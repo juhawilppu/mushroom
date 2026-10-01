@@ -12,10 +12,10 @@ disagree about most of the municipality, which is the point of having both.
 Both species share one set of tiles: stand geometry is by far the largest
 part of the data and is identical between them, so it is written once and
 each species contributes only its own scores. Attributes are shipped as
-inventory codes and turned into English labels in the browser. As tiles, a
-phone downloads and draws only the part of the map in view, however many
-municipalities the map grows to -- this thing gets loaded over mobile data,
-in a forest.
+inventory codes and turned into labels in the browser, in English or, through
+translations.py, Finnish. As tiles, a phone downloads and draws only the part
+of the map in view, however many municipalities the map grows to -- this
+thing gets loaded over mobile data, in a forest.
 
 Run scripts/download_data.py first. Needs tippecanoe (brew install
 tippecanoe) to cut the tiles.
@@ -34,6 +34,7 @@ import area
 import species as sp
 import topography as topo
 from species import PROFILES, SpeciesProfile
+from translations import FINNISH
 
 OUTPUT_GEOJSON = area.ROOT / "output" / "scored_stands.geojson"
 # The deployable site: the page, the vector tiles it reads, and the host's
@@ -577,6 +578,10 @@ def species_config() -> list[dict]:
             "name": profile.name,
             "latin": profile.latin,
             "intro": profile.intro,
+            # whole phrases rather than put together in the browser: Finnish
+            # inflects the name ("Kantarellin todennäköisyys")
+            "legend": f"{profile.name} probability",
+            "sighting": f"{profile.name} sighting",
             "key": profile.map_key,
             "green": profile.green_thresholds,
             "light": {
@@ -608,6 +613,29 @@ def label_config() -> dict:
         "landformFallback": sp.LANDFORM_FALLBACK,
         "slopeBands": sp.SLOPE_BANDS,
     }
+
+
+def strings_in(obj):
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            yield from strings_in(value)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            yield from strings_in(value)
+
+
+def untranslated() -> list[str]:
+    """species.py wording the Finnish page would show in English, for want of
+    an entry in translations.py. The page's own strings are translated right
+    where the template uses them; these are the ones written somewhere else."""
+    shown = set(strings_in(label_config()))
+    for cfg in species_config():
+        # identifiers, the Latin name and the sighting data aren't translated
+        shown.update(strings_in({k: v for k, v in cfg.items()
+                                 if k not in ("slug", "key", "latin", "sightings")}))
+    return sorted(shown - FINNISH.keys())
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -663,8 +691,18 @@ HTML_TEMPLATE = """<!doctype html>
                        font-size: 14px; line-height: 1.3; color: var(--ink-soft); }
   .legend .swatch { flex: none; width: 15px; height: 15px; border-radius: 4px;
                     box-shadow: inset 0 0 0 1px rgba(0,0,0,.16); }
-  .legend small { display: block; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--rule);
+  .legend small { display: flow-root; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--rule);
                   font-size: 12px; line-height: 1.5; color: var(--ink-faint); }
+  /* The language switch closes the note, floated right: it shares the note's
+     last line when there is room, and takes a line of its own when there
+     isn't, so it costs the legend little or no height on a phone. */
+  .lang-switch { float: right; display: flex; gap: 2px; margin: -4px -4px -4px 10px; }
+  .lang-switch button { appearance: none; border: none; padding: 4px 8px; border-radius: 999px;
+                        background: none; font: inherit; font-size: 11px; font-weight: 700;
+                        letter-spacing: .06em; color: var(--ink-faint); cursor: pointer;
+                        transition: background .15s, color .15s; }
+  .lang-switch button:hover { color: var(--ink); }
+  .lang-switch button[aria-pressed="true"] { background: var(--forest); color: #fff; }
   .legend-close { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px;
                   border: none; border-radius: 50%; background: #f1f3ef; color: var(--ink-faint);
                   font-size: 17px; line-height: 30px; text-align: center; cursor: pointer;
@@ -735,11 +773,38 @@ HTML_TEMPLATE = """<!doctype html>
 const SPECIES = __SPECIES__;   // one entry per mushroom, in switcher order
 const LABELS = __LABELS__;     // inventory code -> English, expanded here rather
                                // than repeated on every stand in the tiles
+const FINNISH = __FINNISH__;   // English -> Finnish, from translations.py
 const MID = __MID_THRESHOLD__;
 const CATEGORIES = __CATEGORIES__;
 const TILES = __TILES__;       // the vector tiles written next to this page
 const BOUNDS = __BOUNDS__;     // [west, south, east, north] of the mapped stands
 const STORAGE_KEY = "karkkila-sienikartta-species";
+const LANGUAGE_KEY = "karkkila-sienikartta-language";
+
+// A language picked with the switch sticks. Until then, Finnish goes to
+// anyone whose browser asks for it first, and to anyone on Finnish time:
+// plenty of Finns run their phones in English.
+function initialLanguage() {
+  try {
+    const picked = localStorage.getItem(LANGUAGE_KEY);
+    if (picked === "fi" || picked === "en") return picked;
+  } catch (e) { /* private mode */ }
+  const preferred = (navigator.languages?.[0] || navigator.language || "").toLowerCase();
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return preferred.split("-")[0] === "fi" || zone === "Europe/Helsinki" ? "fi" : "en";
+}
+
+// The page is written in English and every string goes through t() on its
+// way to the screen; one without a Finnish entry stays English.
+let lang = initialLanguage();
+const t = (text) => (lang === "fi" && FINNISH[text]) || text;
+
+// laji.fi dates are ISO (2024-08-15); written out the way each language does
+function formatDate(iso) {
+  const day = new Date(`${iso}T12:00`);
+  if (isNaN(day)) return iso;
+  return day.toLocaleDateString(lang === "fi" ? "fi" : "en-GB", { day: "numeric", month: "long", year: "numeric" });
+}
 
 // An ordered ramp rather than three unrelated hues: the colour cools and
 // darkens as the category improves (chanterelle gold -> yellow-green -> deep
@@ -773,9 +838,9 @@ function scoresOf(p, cfg) {
 
 function mixtureLabel(diversity) {
   for (const [threshold, label] of LABELS.mixtureBands) {
-    if (diversity >= threshold) return label;
+    if (diversity >= threshold) return t(label);
   }
-  return LABELS.mixtureFallback;
+  return t(LABELS.mixtureFallback);
 }
 
 // Where the stand sits in the landscape, from the elevation model: how high
@@ -784,9 +849,9 @@ function mixtureLabel(diversity) {
 function landformLabel(tpi, slope) {
   if (tpi == null) return "?";
   const band = LABELS.landformBands.find(([threshold]) => tpi >= threshold);
-  const landform = band ? band[1] : LABELS.landformFallback;
+  const landform = t(band ? band[1] : LABELS.landformFallback);
   const steep = slope == null ? null : LABELS.slopeBands.find(([threshold]) => slope >= threshold);
-  return steep ? `${landform}, ${steep[1]}` : landform;
+  return steep ? `${landform}, ${t(steep[1])}` : landform;
 }
 
 // A low light/shade ratio means one of two opposite things -- too few trees or
@@ -795,9 +860,9 @@ function landformLabel(tpi, slope) {
 // "shady spruce" on the suppilovahvero one.
 function lightLabel(cfg, ratio, stemcount) {
   const light = cfg.light;
-  if (ratio >= cfg.green.light) return light.good;
-  if (stemcount != null && stemcount < light.sparseStems) return light.sparse;
-  return ratio >= MID ? light.mid : light.poor;
+  if (ratio >= cfg.green.light) return t(light.good);
+  if (stemcount != null && stemcount < light.sparseStems) return t(light.sparse);
+  return t(ratio >= MID ? light.mid : light.poor);
 }
 
 // ratio is this field's contribution to the score, 0-1 relative to its own
@@ -810,7 +875,9 @@ function scoreBadge(ratio, good) {
   // its text up with the scored ones above and below it
   if (ratio == null) return '<span class="score-badge blank"></span>';
   const tier = ratio >= good ? "good" : ratio >= MID ? "mid" : "poor";
-  return `<span class="score-badge ${tier}" title="Effect on score: ${tier}"></span>`;
+  const title = { good: t("Effect on score: good"), mid: t("Effect on score: mid"),
+                  poor: t("Effect on score: poor") }[tier];
+  return `<span class="score-badge ${tier}" title="${title}"></span>`;
 }
 
 function popupRow(label, value, ratio, good) {
@@ -821,30 +888,35 @@ function popupRow(label, value, ratio, good) {
 
 function popupHtml(p, cfg) {
   const s = scoresOf(p, cfg);
-  const soil = `${LABELS.soil[p.st] || "?"} (${LABELS.drainage[p.ds] || "?"})`;
+  const soil = `${t(LABELS.soil[p.st] || "?")} (${t(LABELS.drainage[p.ds] || "?")})`;
   const rows = [
-    popupRow("Site type", LABELS.fertility[p.fc] || "?", s.ratio("fertility"), cfg.green.fertility),
-    popupRow("Development class", LABELS.development[p.dc] || "?", s.ratio("development"), cfg.green.development),
-    popupRow("Dominant tree", LABELS.species[p.ts] || "Other", s.ratio("species"), cfg.green.species),
-    popupRow("Tree mix", mixtureLabel(p.div), p.div, cfg.green.mixture),
-    popupRow(cfg.light.row, lightLabel(cfg, s.ratio("light"), p.stem), s.ratio("light"), cfg.green.light),
-    popupRow("Soil", soil, s.ratio("soil"), cfg.green.soil),
-    popupRow(cfg.terrain.row, landformLabel(p.tpi, p.slp), s.ratio("terrain"), cfg.green.terrain),
+    popupRow(t("Site type"), t(LABELS.fertility[p.fc] || "?"), s.ratio("fertility"), cfg.green.fertility),
+    popupRow(t("Development class"), t(LABELS.development[p.dc] || "?"), s.ratio("development"), cfg.green.development),
+    popupRow(t("Dominant tree"), t(LABELS.species[p.ts] || "Other"), s.ratio("species"), cfg.green.species),
+    popupRow(t("Tree mix"), mixtureLabel(p.div), p.div, cfg.green.mixture),
+    popupRow(t(cfg.light.row), lightLabel(cfg, s.ratio("light"), p.stem), s.ratio("light"), cfg.green.light),
+    popupRow(t("Soil"), soil, s.ratio("soil"), cfg.green.soil),
+    popupRow(t(cfg.terrain.row), landformLabel(p.tpi, p.slp), s.ratio("terrain"), cfg.green.terrain),
   ];
   // binary factor, and only for the species whose model uses it: green when
   // near an esker, red when not
   if (cfg.esker) {
-    rows.push(popupRow("Location", p.esk ? cfg.esker[0] : cfg.esker[1], p.esk ? 1 : 0, 1));
+    rows.push(popupRow(t("Location"), t(p.esk ? cfg.esker[0] : cfg.esker[1]), p.esk ? 1 : 0, 1));
   }
 
   const c = pal(s.category);
   return `<div class="popup-header" style="--cat:${c.fill};--cat-ink:${c.ink};--cat-tint:${c.tint}">` +
-    `<span class="popup-cat">${CATEGORY_LABELS[s.category] || s.category}</span>` +
+    `<span class="popup-cat">${t(CATEGORY_LABELS[s.category] || s.category)}</span>` +
     `<span class="popup-score">${Math.round(s.score)}<em>/100</em></span>` +
     `</div><div class="popup-body">` + rows.join("") +
     `<a class="gmaps-btn" target="_blank" rel="noopener" ` +
     `href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}&travelmode=driving">` +
-    `Navigate here &middot; Google Maps</a></div>`;
+    `${t("Navigate here · Google Maps")}</a></div>`;
+}
+
+function sightingHtml(p) {
+  return `<div class="popup-note"><b>${t(active.sighting)}</b>` +
+    `<span>${t("Reported to laji.fi")}<br>${p.date ? formatDate(p.date) : t("date unknown")}</span></div>`;
 }
 
 // Everything mapped is inside these few municipalities, so this is the area
@@ -866,6 +938,14 @@ const map = new maplibregl.Map({
   pitchWithRotate: false,
   touchPitch: false,
   attributionControl: { compact: true },
+  // MapLibre's own screen-reader labels. It reads these once, so after a
+  // switch of language they follow on the next visit rather than at once.
+  locale: {
+    "Map.Title": t("Map"),
+    "Marker.Title": t("Map marker"),
+    "Popup.Close": t("Close popup"),
+    "AttributionControl.ToggleAttribution": t("Toggle attribution"),
+  },
   style: {
     version: 8,
     sources: {
@@ -947,6 +1027,7 @@ function addFlagImage() {
 }
 
 let popup = null;
+let popupContent = null;  // redraws the open popup, for a change of language
 
 // MapLibre fits a popup inside the map's own edges, but the switcher and the
 // legend sit on top of the map, so the view is nudged to keep the popup clear
@@ -962,10 +1043,11 @@ function keepClear(element) {
   if (dx || dy) map.panBy([dx, dy]);
 }
 
-function openPopup(lngLat, html, className) {
+function openPopup(lngLat, content, className) {
   popup?.remove();
+  popupContent = content;
   popup = new maplibregl.Popup({ className, maxWidth: "300px", focusAfterOpen: false })
-    .setLngLat(lngLat).setHTML(html).addTo(map);
+    .setLngLat(lngLat).setHTML(content()).addTo(map);
   keepClear(popup.getElement());
 }
 
@@ -976,12 +1058,9 @@ map.on("click", (e) => {
   const [hit] = map.queryRenderedFeatures(e.point, { layers: CLICKABLE });
   if (!hit) return;
   if (hit.layer.id === "sightings") {
-    const date = hit.properties.date || "date unknown";
-    openPopup(hit.geometry.coordinates,
-      `<div class="popup-note"><b>${active.name} sighting</b>` +
-      `<span>Reported to laji.fi<br>${date}</span></div>`);
+    openPopup(hit.geometry.coordinates, () => sightingHtml(hit.properties));
   } else if (hit.layer.id === `${TILES.detail}-fill`) {
-    openPopup(e.lngLat, popupHtml(hit.properties, active), "stand-popup");
+    openPopup(e.lngLat, () => popupHtml(hit.properties, active), "stand-popup");
   } else {
     // zoomed out, a stand is a few pixels across and its tile carries only
     // its colour: take the reader in to where a stand can be tapped
@@ -994,17 +1073,27 @@ for (const layer of CLICKABLE) {
 }
 
 // --- legend ------------------------------------------------------------
+// Text set once and left in place carries its English in data-text (or
+// data-label, for an aria-label), which translatePage() turns into the
+// current language.
 const legend = document.createElement("div");
 legend.className = "legend";
 legend.innerHTML =
-  '<button class="legend-close" aria-label="Hide legend">×</button>' +
+  '<button class="legend-close" data-label="Hide legend">×</button>' +
   '<span class="legend-title"></span>' +
   '<div class="legend-row">' +
-  `<span><span class="swatch" style="background:${PALETTE.excellent.fill}"></span>${CATEGORY_LABELS.excellent}</span>` +
-  `<span><span class="swatch" style="background:${PALETTE.high.fill}"></span>${CATEGORY_LABELS.high}</span>` +
-  `<span><span class="swatch" style="background:${PALETTE.medium.fill}"></span>${CATEGORY_LABELS.medium}</span>` +
-  '<span>🚩 Reported find (laji.fi)</span>' +
-  "</div><small></small>";
+  `<span><span class="swatch" style="background:${PALETTE.excellent.fill}"></span><span data-text="${CATEGORY_LABELS.excellent}"></span></span>` +
+  `<span><span class="swatch" style="background:${PALETTE.high.fill}"></span><span data-text="${CATEGORY_LABELS.high}"></span></span>` +
+  `<span><span class="swatch" style="background:${PALETTE.medium.fill}"></span><span data-text="${CATEGORY_LABELS.medium}"></span></span>` +
+  '<span>🚩<span data-text="Reported find (laji.fi)"></span></span>' +
+  '</div><small><span class="legend-intro"></span> ' +
+  `<span data-text="An estimate from each forest stand's ecological attributes (site type, trees, soil) ` +
+  `- not a record of where mushrooms have actually grown."></span>` +
+  // each language named in itself, the way language switches usually are
+  '<span class="lang-switch" role="group" data-label="Language">' +
+  '<button type="button" lang="fi" title="Suomi" aria-label="Suomi">FI</button>' +
+  '<button type="button" lang="en" title="English" aria-label="English">EN</button>' +
+  "</span></small>";
 document.body.appendChild(legend);
 
 // closing hides it for the rest of this page view; no reopen button, since a
@@ -1013,11 +1102,40 @@ legend.querySelector(".legend-close").addEventListener("click", () => {
   legend.hidden = true;
 });
 
+// --- language ----------------------------------------------------------
+const languageSwitch = legend.querySelector(".lang-switch");
+
+function translatePage() {
+  document.documentElement.lang = lang;
+  document.title = t("Mushroom map");
+  for (const el of document.querySelectorAll("[data-text]")) el.textContent = t(el.dataset.text);
+  for (const el of document.querySelectorAll("[data-label]")) el.setAttribute("aria-label", t(el.dataset.label));
+  for (const button of languageSwitch.children) {
+    button.setAttribute("aria-pressed", String(button.lang === lang));
+  }
+}
+
+function setLanguage(code) {
+  lang = code;
+  translatePage();
+  // popups are drawn from scratch rather than tagged, so the open one is
+  // opened afresh: swapping its HTML in place would drop the label MapLibre
+  // gives its close button only when a popup opens
+  if (popup?.isOpen()) openPopup(popup.getLngLat(), popupContent, popup.options.className);
+  locationMarker?.getPopup().setHTML(locationNote());
+  try { localStorage.setItem(LANGUAGE_KEY, code); } catch (e) { /* private mode */ }
+}
+
+languageSwitch.addEventListener("click", (e) => {
+  const button = e.target.closest("button");
+  if (button && button.lang !== lang) setLanguage(button.lang);
+});
+
 // --- species switcher --------------------------------------------------
 const switcher = document.createElement("div");
 switcher.className = "species-switch";
 switcher.setAttribute("role", "tablist");
-switcher.setAttribute("aria-label", "Choose a mushroom");
+switcher.dataset.label = "Choose a mushroom";
 document.body.appendChild(switcher);
 
 let active = null;
@@ -1029,20 +1147,19 @@ function selectSpecies(cfg) {
   active = cfg;
   if (mapReady) paintSpecies(cfg);
 
-  legend.querySelector(".legend-title").textContent = `${cfg.name} probability`;
-  legend.querySelector("small").textContent =
-    `${cfg.intro} An estimate from each forest stand's ecological attributes ` +
-    "(site type, trees, soil) - not a record of where mushrooms have actually grown.";
+  legend.querySelector(".legend-title").dataset.text = cfg.legend;
+  legend.querySelector(".legend-intro").dataset.text = cfg.intro;
   for (const button of switcher.children) {
     button.setAttribute("aria-selected", String(button.dataset.slug === cfg.slug));
   }
+  translatePage();
   try { localStorage.setItem(STORAGE_KEY, cfg.slug); } catch (e) { /* private mode */ }
 }
 
 for (const cfg of SPECIES) {
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = cfg.name;
+  button.dataset.text = cfg.name;
   button.dataset.slug = cfg.slug;
   button.setAttribute("role", "tab");
   button.setAttribute("aria-selected", "false");
@@ -1063,6 +1180,7 @@ selectSpecies(SPECIES.find((s) => s.slug === remembered) || SPECIES[0]);
 const LOCATION_REFRESH_MS = 30000;
 let locationMarker = null;
 let firstFix = true;
+const locationNote = () => `<div class="popup-note"><span>${t("You are here")}</span></div>`;
 
 // The accuracy radius as a polygon: MapLibre's own circles are sized in screen
 // pixels, not metres on the ground
@@ -1092,7 +1210,7 @@ function updateLocation() {
         locationMarker = new maplibregl.Marker({ element: dot })
           .setLngLat(lngLat)
           .setPopup(new maplibregl.Popup({ offset: 12, closeButton: false })
-            .setHTML('<div class="popup-note"><span>You are here</span></div>'))
+            .setHTML(locationNote()))
           .addTo(map);
       } else {
         locationMarker.setLngLat(lngLat);
@@ -1156,6 +1274,7 @@ def render_html(geojson_dict: dict) -> str:
     html = html.replace("__BOUNDS__", json.dumps(data_bounds(geojson_dict)))
     html = html.replace("__SPECIES__", json.dumps(species_config(), ensure_ascii=False))
     html = html.replace("__LABELS__", json.dumps(label_config(), ensure_ascii=False))
+    html = html.replace("__FINNISH__", json.dumps(FINNISH, ensure_ascii=False))
     html = html.replace("__CATEGORIES__", json.dumps(MAPPED_CATEGORIES))
     return html.replace("__MID_THRESHOLD__", json.dumps(sp.MID_THRESHOLD))
 
@@ -1186,6 +1305,11 @@ def main() -> None:
     print(f"Wrote {OUTPUT_HTML} ({OUTPUT_HTML.stat().st_size / 1e3:.0f} KB)")
     for cfg in species_config():
         print(f"  {cfg['name']}: {len(cfg['sightings']['features'])} laji.fi sightings embedded as flags")
+    missing = untranslated()
+    if missing:
+        print(f"\nNo Finnish in scripts/translations.py for {len(missing)} strings, shown in English:")
+        for text in missing:
+            print(f"  {text!r}")
 
 
 if __name__ == "__main__":

@@ -65,6 +65,11 @@ yellow or red dot on each row shows which factors helped and which held it
 back. On a phone the map also shows where you are, updated every 30 seconds,
 and each popup has a button for directions there in Google Maps.
 
+The map is in Finnish and English. It opens in Finnish if your browser's
+first language is Finnish or your device is on Finnish time (plenty of Finns
+run their phones in English), and in English otherwise. The FI / EN switch at
+the foot of the legend changes it and remembers the choice.
+
 ## The two species
 
 Each mushroom has its own habitat model in `scripts/species.py`.
@@ -217,6 +222,12 @@ To check whether a change to the weights actually helped, run
 To add a mushroom, write another `SpeciesProfile` in `scripts/species.py`
 and add it to `PROFILES`. The scoring, the map, the switcher and the
 sighting downloads all pick it up from there.
+
+Everything on the page is written in English, in the code and in the label
+tables in `scripts/species.py`. The Finnish lives in `scripts/translations.py`,
+keyed by that English. Anything without an entry shows in English on the
+Finnish page, and `build_map.py` lists any such text from `species.py` when it
+writes the page, so a new mushroom or a reworded label needs a line there too.
 
 To change which municipalities are mapped, edit `MUNICIPALITIES` in
 `scripts/area.py`, then rerun both scripts. Each municipality's data is

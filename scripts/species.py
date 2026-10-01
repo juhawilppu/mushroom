@@ -19,8 +19,9 @@ from dataclasses import dataclass, field
 
 # --- shared code tables (metsätietostandardi), species-independent ---------
 
-# UI labels are English. The Finnish forest site types keep their standard
-# abbreviations (OMT, MT, ...), which is what Finnish sources call them too.
+# UI labels are written in English; translations.py has their Finnish. The
+# English site types keep the standard Finnish abbreviations (OMT, MT, ...),
+# which is what Finnish sources call them too.
 FERTILITY_LABELS = {
     "1": "Herb-rich forest", "2": "Herb-rich heath forest (OMT)", "3": "Mesic heath forest (MT)",
     "4": "Sub-xeric heath forest (VT)", "5": "Xeric heath forest (CT)", "6": "Barren heath forest",
@@ -148,7 +149,7 @@ SLOPE_BANDS = [(11, "steep"), (7, "sloping"), (4, "gently sloping")]
 class SpeciesProfile:
     slug: str
     map_key: str         # short property key this species' scores ship under
-    name: str            # English name, as shown in the UI
+    name: str            # English name, as shown in the UI (Finnish in translations.py)
     latin: str
     laji_target: str     # laji.fi search target (scientific name)
     intro: str           # one-line habitat summary for the legend
