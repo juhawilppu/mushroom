@@ -1,6 +1,6 @@
 """Score the forest stands of the mapped area (see area.py) for mushroom
-habitat suitability and render the result as one standalone Leaflet HTML map
-with a species switcher.
+habitat suitability and render the result as a MapLibre map with a species
+switcher: a small page, plus the stands as vector tiles.
 
 The habitat heuristics themselves live in `scripts/species.py`, one profile
 per mushroom; this module is the engine that applies a profile to the forest
@@ -9,18 +9,21 @@ well-drained mineral soil near eskers; suppilovahvero wants damp, shady,
 moss-floored spruce forest and is at home on peat -- so the two maps
 disagree about most of the municipality, which is the point of having both.
 
-Both species ship in a single HTML file: stand geometry is by far the
-largest part of the payload and is identical between them, so it is written
-once and each species contributes only its own scores. Attributes are
-shipped as inventory codes and turned into English labels in the browser,
-and the stands themselves are packed (see to_page_payload), which keeps
-the page to a few megabytes even with several municipalities on it -- this
-thing gets loaded over mobile data, in a forest.
+Both species share one set of tiles: stand geometry is by far the largest
+part of the data and is identical between them, so it is written once and
+each species contributes only its own scores. Attributes are shipped as
+inventory codes and turned into English labels in the browser. As tiles, a
+phone downloads and draws only the part of the map in view, however many
+municipalities the map grows to -- this thing gets loaded over mobile data,
+in a forest.
 
-Run scripts/download_data.py first.
+Run scripts/download_data.py first. Needs tippecanoe (brew install
+tippecanoe) to cut the tiles.
 """
 
 import json
+import shutil
+import subprocess
 
 import geopandas as gpd
 import numpy as np
@@ -33,7 +36,26 @@ import topography as topo
 from species import PROFILES, SpeciesProfile
 
 OUTPUT_GEOJSON = area.ROOT / "output" / "scored_stands.geojson"
-OUTPUT_HTML = area.ROOT / "output" / "mushroom_map.html"
+# The deployable site: the page, the vector tiles it reads, and the host's
+# header rules. `wrangler pages deploy output/site` publishes it as it stands.
+SITE_DIR = area.ROOT / "output" / "site"
+OUTPUT_HTML = SITE_DIR / "index.html"
+TILES_DIR = SITE_DIR / "tiles"
+# Pages serves .pbf as application/octet-stream, which Cloudflare passes on
+# uncompressed; declared as protobuf, the tiles go out brotli-compressed.
+PAGES_HEADERS = "/tiles/*\n  Content-Type: application/x-protobuf\n"
+TILES_INPUT = area.CACHE_DIR / "stands_for_tiles.geojsonl"
+# Zoomed out, a stand is a few pixels across -- too small to tap -- so the
+# tiles up to there carry only what the colours need ("overview"), and the
+# full attributes the popup reads ("stands") start at DETAIL_MIN_ZOOM. That
+# takes the z11-z12 tiles, the ones browsed most, to about a third the size.
+OVERVIEW_LAYER, DETAIL_LAYER = "overview", "stands"
+DETAIL_MIN_ZOOM = 13
+# Below z7 the whole area is a few pixels across. Above z13 the browser scales
+# z13 tiles up itself: a z13 tile is about 2.4 km wide here, held at 4096 units
+# across, so stand outlines already simplified to 2 m lose nothing -- and
+# stopping at 13 keeps the tile count well inside what Pages accepts.
+TILE_MIN_ZOOM, TILE_MAX_ZOOM = 7, 13
 
 CURRENT_TREESTAND_CLASS = "2"  # "Nykytilan puusto" = current, as opposed to inventory/forecast
 
@@ -448,57 +470,85 @@ def to_geojson_dict(frames: dict[str, gpd.GeoDataFrame]) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
-# Properties the page reads, in the order each stand's packed row carries them.
-# The stand id is not among them: it is in the GeoJSON export for GIS use, but
-# nothing on the page reads it.
-PAGE_FIELDS = (["lat", "lon", "fc", "dc", "ts", "st", "ds", "div", "stem", "esk", "tpi", "slp"]
-               + [profile.map_key for profile in PROFILES.values()])
+def tile_properties(props: dict) -> dict:
+    """A stand's properties as a vector tile can hold them: scalars only.
 
-
-def encode_ring(ring: list) -> str:
-    """One polygon ring in Google's encoded polyline format, latitude first.
-
-    Each coordinate is stored as its difference from the previous one, at the
-    same 1e-5 degree precision COORD_DECIMALS rounds to, packed five bits to a
-    printable character. Stand outlines are short hops between nearby points,
-    so a coordinate costs two or three characters instead of the eight or nine
-    of a decimal number.
+    Each species' [score, category, ...ratios] block becomes named fields --
+    k_score, k_cat, k_fertility and so on -- and missing values are left out
+    rather than written as null. The stand id stays behind in the GeoJSON
+    export: nothing on the page reads it.
     """
-    scale = 10 ** COORD_DECIMALS
-    chars, previous = [], (0, 0)
-    for lon, lat in ring:
-        point = (round(lat * scale), round(lon * scale))
-        for value, last in zip(point, previous):
-            delta = value - last
-            delta = ~(delta << 1) if delta < 0 else delta << 1
-            while delta >= 0x20:
-                chars.append(chr((0x20 | (delta & 0x1F)) + 63))
-                delta >>= 5
-            chars.append(chr(delta + 63))
-        previous = point
-    return "".join(chars)
+    out = {name: value for name, value in props.items()
+           if name != "id" and value is not None and not isinstance(value, list)}
+    for profile in PROFILES.values():
+        block = props.get(profile.map_key)
+        if block is None:
+            continue
+        score, category, *ratios = block
+        key = profile.map_key
+        out[f"{key}_score"] = score
+        out[f"{key}_cat"] = category
+        out.update({f"{key}_{factor}": ratio for factor, ratio in zip(SCORED_FACTORS, ratios)})
+    return out
 
 
-def to_page_payload(geojson_dict: dict) -> dict:
-    """The FeatureCollection repacked for the page, which unpacks it on load.
+def write_tiles(geojson_dict: dict) -> None:
+    """Cut the mapped stands into vector tiles, one file per tile.
 
-    Written out as plain GeoJSON, the stands of even three municipalities
-    come to over 20 MB -- far too much to load over mobile data in the middle
-    of a forest.
-    Nearly all of that is repetition: every stand spells out the same property
-    names, and every vertex a full decimal coordinate. Here the names are
-    listed once, each stand is a row of values in that order, and each ring is
-    an encoded polyline.
+    Shipped inside the page, the stands of nine municipalities came to 16 MB
+    and tens of thousands of polygons a phone had to re-project on every zoom.
+    As tiles, a phone downloads and draws only the part of the map in view.
+    They are written as a plain {z}/{x}/{y}.pbf directory rather than one
+    PMTiles archive because Cloudflare Pages ignores HTTP range requests,
+    which a PMTiles archive depends on. Tiles are left uncompressed for the
+    same reason: the host compresses them on the way out.
     """
-    features = geojson_dict["features"]
-    for feature in features:
-        if feature["geometry"]["type"] != "Polygon":
-            raise ValueError(f"the page only unpacks Polygons, got {feature['geometry']['type']}")
-    return {
-        "fields": PAGE_FIELDS,
-        "rows": [[f["properties"].get(name) for name in PAGE_FIELDS] for f in features],
-        "rings": [[encode_ring(ring) for ring in f["geometry"]["coordinates"]] for f in features],
-    }
+    TILES_INPUT.parent.mkdir(parents=True, exist_ok=True)
+    with TILES_INPUT.open("w", encoding="utf-8") as out:
+        for feature in geojson_dict["features"]:
+            props = tile_properties(feature["properties"])
+            # every stand goes in twice: colours only while zoomed out, the
+            # lot once it is big enough to tap
+            for layer, zooms, properties in (
+                (OVERVIEW_LAYER, {"maxzoom": DETAIL_MIN_ZOOM - 1},
+                 {k: v for k, v in props.items() if k.endswith("_cat")}),
+                (DETAIL_LAYER, {"minzoom": DETAIL_MIN_ZOOM}, props),
+            ):
+                out.write(json.dumps({
+                    "type": "Feature",
+                    "tippecanoe": {"layer": layer, **zooms},
+                    "geometry": feature["geometry"],
+                    "properties": properties,
+                }, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    # tippecanoe adds to an existing directory, so a stand dropped since the
+    # last build would otherwise live on in a stale tile
+    shutil.rmtree(TILES_DIR, ignore_errors=True)
+    subprocess.run([
+        "tippecanoe", "--quiet", "--force",
+        "--output-to-directory", str(TILES_DIR),
+        "--minimum-zoom", str(TILE_MIN_ZOOM),
+        "--maximum-zoom", str(TILE_MAX_ZOOM),
+        "--no-tile-compression",
+        # neighbouring stands share their borders, and simplifying each one
+        # on its own would open slivers between them at low zoom
+        "--detect-shared-borders",
+        # tippecanoe's default keeps outlines within 1/8 of a screen pixel;
+        # a whole pixel is still invisible and makes the zoomed-out tiles far
+        # lighter. z13 stays exact, as the browser scales it up for the
+        # closest zooms.
+        "--simplification=8", "--simplify-only-low-zooms",
+        "--drop-densest-as-needed",
+        "--read-parallel",
+        str(TILES_INPUT),
+    ], check=True)
+
+
+def data_bounds(geojson_dict: dict) -> list[float]:
+    """[west, south, east, north] of the mapped stands' centroids."""
+    lons = [f["properties"]["lon"] for f in geojson_dict["features"]]
+    lats = [f["properties"]["lat"] for f in geojson_dict["features"]]
+    return [min(lons), min(lats), max(lons), max(lats)]
 
 
 def load_sightings_geojson(profile: SpeciesProfile) -> dict:
@@ -566,7 +616,7 @@ HTML_TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Mushroom map</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.css">
 <style>
   :root {
     --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -579,10 +629,6 @@ HTML_TEMPLATE = """<!doctype html>
   html, body { margin: 0; height: 100%; font-family: var(--font); color: var(--ink);
                -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
   #map { height: 100%; background: #eceee9; }
-  /* OSM's own greens and browns compete with the score colours for attention.
-     Muting the tiles keeps every road, path and label legible while letting
-     the stand polygons read as the data layer they are. */
-  .leaflet-tile-pane { filter: saturate(.45) brightness(1.06) contrast(.94); }
 
   /* --- species switcher ------------------------------------------------ */
   /* Top centre: the one control on the map, and the thing that decides what
@@ -629,15 +675,14 @@ HTML_TEMPLATE = """<!doctype html>
                      border: 2px solid white; box-shadow: 0 0 0 2px rgba(26,115,232,.45), 0 1px 4px rgba(0,0,0,.3); }
 
   /* --- popup ----------------------------------------------------------- */
-  .leaflet-popup-content-wrapper { padding: 0; border-radius: 14px; overflow: hidden;
-                                   box-shadow: 0 12px 36px rgba(23,35,28,.22); }
-  .leaflet-popup-content { margin: 0; font-size: 15px; line-height: 1.5; min-width: 258px; }
-  .leaflet-popup-close-button {
-    color: var(--ink-faint) !important; background: none;
-    top: 10px !important; right: 8px !important; font-size: 20px !important;
-    width: 26px !important; height: 26px !important; line-height: 24px !important; text-align: center;
-  }
-  .leaflet-popup-close-button:hover { color: var(--ink) !important; }
+  .maplibregl-popup-content { padding: 0; border-radius: 14px; overflow: hidden;
+                              box-shadow: 0 12px 36px rgba(23,35,28,.22);
+                              font-size: 15px; line-height: 1.5; }
+  .stand-popup .maplibregl-popup-content { min-width: 258px; }
+  .maplibregl-popup-close-button { top: 10px; right: 8px; width: 26px; height: 26px;
+                                   border-radius: 50%; font-size: 20px; line-height: 24px;
+                                   color: var(--ink-faint); background: none; }
+  .maplibregl-popup-close-button:hover { color: var(--ink); background: none; }
   /* the category's three tones (fill, ink, tint) arrive as custom properties
      set inline per stand, so one palette in JS drives map, legend and popup */
   .popup-header { padding: 13px 46px 12px 16px; background: var(--cat-tint);
@@ -672,34 +717,29 @@ HTML_TEMPLATE = """<!doctype html>
                box-shadow: 0 2px 8px rgba(31,81,54,.26); transition: background .15s, transform .08s; }
   .gmaps-btn:hover { background: #18402b; }
   .gmaps-btn:active { transform: translateY(1px); }
-  .sighting-flag { font-size: 20px; line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,.5); }
-  /* .leaflet-popup-content carries no padding of its own (the stand popup
-     supplies its own), so the sighting popup brings a padded wrapper */
+  /* .maplibregl-popup-content carries no padding of its own (the stand popup
+     supplies its own), so the other popups bring a padded wrapper */
   .popup-note { padding: 14px 40px 14px 16px; }
   .popup-note b { display: block; margin-bottom: 3px; font-size: 12px; font-weight: 700;
                   letter-spacing: .07em; text-transform: uppercase; color: var(--forest); }
   .popup-note span { color: var(--ink-soft); font-size: 14px; }
 
-  .leaflet-container { font-family: var(--font); }
-  .leaflet-control-attribution { font-size: 11px; background: rgba(255,255,255,.82) !important; }
+  .maplibregl-map { font-family: var(--font); }
+  .maplibregl-ctrl-attrib { font-size: 11px; }
 </style>
 </head>
 <body>
 <div id="map"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.js"></script>
 <script>
-const PACKED = __STANDS__;     // the stands, packed by to_page_payload in build_map.py
 const SPECIES = __SPECIES__;   // one entry per mushroom, in switcher order
 const LABELS = __LABELS__;     // inventory code -> English, expanded here rather
-                               // than repeated on every stand in the payload
+                               // than repeated on every stand in the tiles
 const MID = __MID_THRESHOLD__;
-const STORAGE_KEY = "karkkila-sienikartta-species";
-
-// Each species' scores ride along as a compact array under its own key:
-// [score, category index, then one ratio per scored factor].
-const SCORE = 0, CATEGORY = 1;
-const RATIO = { fertility: 2, development: 3, species: 4, light: 5, soil: 6, terrain: 7 };
 const CATEGORIES = __CATEGORIES__;
+const TILES = __TILES__;       // the vector tiles written next to this page
+const BOUNDS = __BOUNDS__;     // [west, south, east, north] of the mapped stands
+const STORAGE_KEY = "karkkila-sienikartta-species";
 
 // An ordered ramp rather than three unrelated hues: the colour cools and
 // darkens as the category improves (chanterelle gold -> yellow-green -> deep
@@ -721,51 +761,15 @@ const CATEGORY_LABELS = { excellent: "Excellent", high: "High", medium: "Moderat
 // basemap underneath is busy
 const FILL_OPACITY = { excellent: 0.72, high: 0.58, medium: 0.45 };
 
-// One ring from Google's encoded polyline format (latitude first, 1e-5
-// degrees), back into GeoJSON's [lon, lat] pairs.
-function decodeRing(encoded) {
-  const ring = [];
-  let i = 0, lat = 0, lon = 0;
-  while (i < encoded.length) {
-    const deltas = [0, 0].map(() => {
-      let shift = 0, value = 0, chunk;
-      do {
-        chunk = encoded.charCodeAt(i++) - 63;
-        value |= (chunk & 0x1f) << shift;
-        shift += 5;
-      } while (chunk >= 0x20);
-      return value & 1 ? ~(value >> 1) : value >> 1;
-    });
-    lat += deltas[0];
-    lon += deltas[1];
-    ring.push([lon / 1e5, lat / 1e5]);
-  }
-  return ring;
+// A species' scores ride on each stand as flat fields -- k_score, k_cat,
+// k_fertility and so on -- because a vector tile holds only plain values.
+function scoresOf(p, cfg) {
+  return {
+    score: p[`${cfg.key}_score`],
+    category: CATEGORIES[p[`${cfg.key}_cat`]],
+    ratio: (factor) => p[`${cfg.key}_${factor}`],
+  };
 }
-
-// Unpacked once into the plain GeoJSON that everything below works with: the
-// packing only exists to keep the download small.
-const STANDS = {
-  type: "FeatureCollection",
-  features: PACKED.rows.map((row, i) => ({
-    type: "Feature",
-    properties: Object.fromEntries(PACKED.fields.map((name, j) => [name, row[j]])),
-    geometry: { type: "Polygon", coordinates: PACKED.rings[i].map(decodeRing) },
-  })),
-};
-
-// Everything mapped is inside these few municipalities, so this is the area
-// the map is ever useful in. Built from the stand centroids rather than from a
-// layer, so it covers both species regardless of which one is showing.
-const DATA_BOUNDS = L.latLngBounds(
-  STANDS.features.map((f) => [f.properties.lat, f.properties.lon])
-).pad(0.02);
-
-const map = L.map('map', { preferCanvas: true, zoomControl: false });
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors',
-  maxZoom: 19,
-}).addTo(map);
 
 function mixtureLabel(diversity) {
   for (const [threshold, label] of LABELS.mixtureBands) {
@@ -816,17 +820,16 @@ function popupRow(label, value, ratio, good) {
 }
 
 function popupHtml(p, cfg) {
-  const v = p[cfg.key];
-  const category = CATEGORIES[v[CATEGORY]];
+  const s = scoresOf(p, cfg);
   const soil = `${LABELS.soil[p.st] || "?"} (${LABELS.drainage[p.ds] || "?"})`;
   const rows = [
-    popupRow("Site type", LABELS.fertility[p.fc] || "?", v[RATIO.fertility], cfg.green.fertility),
-    popupRow("Development class", LABELS.development[p.dc] || "?", v[RATIO.development], cfg.green.development),
-    popupRow("Dominant tree", LABELS.species[p.ts] || "Other", v[RATIO.species], cfg.green.species),
+    popupRow("Site type", LABELS.fertility[p.fc] || "?", s.ratio("fertility"), cfg.green.fertility),
+    popupRow("Development class", LABELS.development[p.dc] || "?", s.ratio("development"), cfg.green.development),
+    popupRow("Dominant tree", LABELS.species[p.ts] || "Other", s.ratio("species"), cfg.green.species),
     popupRow("Tree mix", mixtureLabel(p.div), p.div, cfg.green.mixture),
-    popupRow(cfg.light.row, lightLabel(cfg, v[RATIO.light], p.stem), v[RATIO.light], cfg.green.light),
-    popupRow("Soil", soil, v[RATIO.soil], cfg.green.soil),
-    popupRow(cfg.terrain.row, landformLabel(p.tpi, p.slp), v[RATIO.terrain], cfg.green.terrain),
+    popupRow(cfg.light.row, lightLabel(cfg, s.ratio("light"), p.stem), s.ratio("light"), cfg.green.light),
+    popupRow("Soil", soil, s.ratio("soil"), cfg.green.soil),
+    popupRow(cfg.terrain.row, landformLabel(p.tpi, p.slp), s.ratio("terrain"), cfg.green.terrain),
   ];
   // binary factor, and only for the species whose model uses it: green when
   // near an esker, red when not
@@ -834,59 +837,160 @@ function popupHtml(p, cfg) {
     rows.push(popupRow("Location", p.esk ? cfg.esker[0] : cfg.esker[1], p.esk ? 1 : 0, 1));
   }
 
-  const c = pal(category);
+  const c = pal(s.category);
   return `<div class="popup-header" style="--cat:${c.fill};--cat-ink:${c.ink};--cat-tint:${c.tint}">` +
-    `<span class="popup-cat">${CATEGORY_LABELS[category] || category}</span>` +
-    `<span class="popup-score">${Math.round(v[SCORE])}<em>/100</em></span>` +
+    `<span class="popup-cat">${CATEGORY_LABELS[s.category] || s.category}</span>` +
+    `<span class="popup-score">${Math.round(s.score)}<em>/100</em></span>` +
     `</div><div class="popup-body">` + rows.join("") +
     `<a class="gmaps-btn" target="_blank" rel="noopener" ` +
     `href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}&travelmode=driving">` +
     `Navigate here &middot; Google Maps</a></div>`;
 }
 
-// One Leaflet layer per species, built on first use and kept afterwards, so
-// flipping back and forth costs nothing. A stand the active species has no
-// score for is simply not in its layer.
-const layers = new Map();
-function speciesLayer(cfg) {
-  if (!layers.has(cfg.slug)) {
-    const stands = L.geoJSON(STANDS, {
-      filter: (feature) => feature.properties[cfg.key] != null,
-      style: (feature) => {
-        const category = CATEGORIES[feature.properties[cfg.key][CATEGORY]];
-        const c = pal(category);
-        return { color: c.line, weight: 1, opacity: 0.6,
-                 fillColor: c.fill, fillOpacity: FILL_OPACITY[category] ?? 0.45 };
+// Everything mapped is inside these few municipalities, so this is the area
+// the map is ever useful in, padded a little so a fix right at its edge counts.
+const PAD = 0.02;
+const [WEST, SOUTH, EAST, NORTH] = BOUNDS;
+const DATA_BOUNDS = new maplibregl.LngLatBounds(
+  [WEST - PAD * (EAST - WEST), SOUTH - PAD * (NORTH - SOUTH)],
+  [EAST + PAD * (EAST - WEST), NORTH + PAD * (NORTH - SOUTH)],
+);
+
+const map = new maplibregl.Map({
+  container: "map",
+  // framed clear of the switcher above and the legend below
+  bounds: BOUNDS,
+  fitBoundsOptions: { padding: { top: 70, bottom: 150, left: 20, right: 20 } },
+  maxZoom: 19,
+  dragRotate: false,
+  pitchWithRotate: false,
+  touchPitch: false,
+  attributionControl: { compact: true },
+  style: {
+    version: 8,
+    sources: {
+      osm: {
+        type: "raster",
+        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        maxzoom: 19,
+        attribution: "&copy; OpenStreetMap contributors",
       },
-    // One popup for the whole layer rather than one per stand: Leaflet hands
-    // the clicked stand to the content function, so the popup is filled in as
-    // it opens and tens of thousands of stands carry no popup of their own.
-    // The switcher and the legend are fixed overlays Leaflet knows nothing
-    // about, so autopan has to be told to keep the popup clear of both --
-    // without this a popup near the top edge opens with its score hidden
-    // behind the species buttons.
-    }).bindPopup((stand) => popupHtml(stand.feature.properties, cfg), {
-      minWidth: 258,
-      autoPanPaddingTopLeft: L.point(12, 72),
-      autoPanPaddingBottomRight: L.point(12, 150),
-    });
-    // Real laji.fi sighting flags for this species, where a report happens to
-    // fall inside the mapped area
-    const sightings = L.geoJSON(cfg.sightings, {
-      pointToLayer: (feature, latlng) => L.marker(latlng, {
-        icon: L.divIcon({ className: "", html: '<div class="sighting-flag">🚩</div>', iconSize: [20, 20], iconAnchor: [4, 18] }),
-      }),
-      onEachFeature: (feature, layer) => {
-        const d = feature.properties.date || "date unknown";
-        layer.bindPopup(
-          `<div class="popup-note"><b>${cfg.name} sighting</b>` +
-          `<span>Reported to laji.fi<br>${d}</span></div>`
-        );
+      stands: {
+        type: "vector",
+        // tiles are fetched from a web worker, which has no page to resolve
+        // a relative URL against, so the tile directory is made absolute here
+        tiles: [new URL("tiles/", location.href).href + "{z}/{x}/{y}.pbf"],
+        minzoom: TILES.minzoom,
+        maxzoom: TILES.maxzoom,
       },
-    });
-    layers.set(cfg.slug, { stands, sightings });
+    },
+    layers: [{
+      id: "osm", type: "raster", source: "osm",
+      // OSM's own greens and browns compete with the score colours for
+      // attention. Muting the tiles keeps every road, path and label legible
+      // while letting the stands read as the data layer they are.
+      paint: { "raster-saturation": -0.55, "raster-contrast": -0.06, "raster-brightness-min": 0.06 },
+    }],
+  },
+});
+map.touchZoomRotate.disableRotation();
+map.keyboard.disableRotation();
+
+// Zoomed out, the tiles carry each stand's colour only ("overview"); from
+// TILES.detailMinZoom on they carry everything the popup shows ("stands").
+const STAND_LAYERS = [TILES.overview, TILES.detail];
+
+// A style expression picking a value by the active species' category
+function byCategory(cfg, pick, fallback) {
+  return ["match", ["get", `${cfg.key}_cat`],
+          ...CATEGORIES.flatMap((category, i) => [i, pick(category)]), fallback];
+}
+
+// Recolour the stands for a species; a stand that species has nothing to say
+// about has no category for it, and is left off the map.
+function paintSpecies(cfg) {
+  const scored = ["has", `${cfg.key}_cat`];
+  for (const layer of STAND_LAYERS) {
+    map.setFilter(`${layer}-fill`, scored);
+    map.setFilter(`${layer}-line`, scored);
+    map.setPaintProperty(`${layer}-fill`, "fill-color", byCategory(cfg, (c) => pal(c).fill, FALLBACK.fill));
+    map.setPaintProperty(`${layer}-fill`, "fill-opacity", byCategory(cfg, (c) => FILL_OPACITY[c], 0.45));
+    map.setPaintProperty(`${layer}-line`, "line-color", byCategory(cfg, (c) => pal(c).line, FALLBACK.line));
   }
-  return layers.get(cfg.slug);
+  map.setFilter("sightings", ["==", ["get", "species"], cfg.slug]);
+}
+
+// Real laji.fi sighting flags, where a report happens to fall inside the
+// mapped area: every species in one source, filtered to the active one
+const SIGHTINGS = {
+  type: "FeatureCollection",
+  features: SPECIES.flatMap((cfg) => cfg.sightings.features.map((feature) => ({
+    ...feature, properties: { ...feature.properties, species: cfg.slug },
+  }))),
+};
+
+// The flag is the legend's own emoji drawn onto a canvas, at twice its size so
+// it stays sharp on high-density screens
+function addFlagImage() {
+  const scale = 2, size = 24 * scale;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.font = `${20 * scale}px sans-serif`;
+  ctx.textBaseline = "bottom";
+  ctx.shadowColor = "rgba(0,0,0,.5)";
+  ctx.shadowBlur = 2 * scale;
+  ctx.shadowOffsetY = scale;
+  ctx.fillText("🚩", 0, size - 2 * scale);
+  map.addImage("flag", ctx.getImageData(0, 0, size, size), { pixelRatio: scale });
+}
+
+let popup = null;
+
+// MapLibre fits a popup inside the map's own edges, but the switcher and the
+// legend sit on top of the map, so the view is nudged to keep the popup clear
+// of both -- without this a popup near the top edge opens with its score
+// hidden behind the species buttons.
+function keepClear(element) {
+  const box = element.getBoundingClientRect();
+  const top = switcher.getBoundingClientRect().bottom + 12;
+  const bottom = (legend.hidden ? window.innerHeight : legend.getBoundingClientRect().top) - 12;
+  const right = window.innerWidth - 12;
+  const dy = box.top < top ? box.top - top : Math.max(0, Math.min(box.bottom - bottom, box.top - top));
+  const dx = box.left < 12 ? box.left - 12 : Math.max(0, Math.min(box.right - right, box.left - 12));
+  if (dx || dy) map.panBy([dx, dy]);
+}
+
+function openPopup(lngLat, html, className) {
+  popup?.remove();
+  popup = new maplibregl.Popup({ className, maxWidth: "300px", focusAfterOpen: false })
+    .setLngLat(lngLat).setHTML(html).addTo(map);
+  keepClear(popup.getElement());
+}
+
+const CLICKABLE = ["sightings", `${TILES.detail}-fill`, `${TILES.overview}-fill`];
+
+map.on("click", (e) => {
+  // topmost first, so a flag wins over the stand it stands in
+  const [hit] = map.queryRenderedFeatures(e.point, { layers: CLICKABLE });
+  if (!hit) return;
+  if (hit.layer.id === "sightings") {
+    const date = hit.properties.date || "date unknown";
+    openPopup(hit.geometry.coordinates,
+      `<div class="popup-note"><b>${active.name} sighting</b>` +
+      `<span>Reported to laji.fi<br>${date}</span></div>`);
+  } else if (hit.layer.id === `${TILES.detail}-fill`) {
+    openPopup(e.lngLat, popupHtml(hit.properties, active), "stand-popup");
+  } else {
+    // zoomed out, a stand is a few pixels across and its tile carries only
+    // its colour: take the reader in to where a stand can be tapped
+    map.easeTo({ center: e.lngLat, zoom: TILES.detailMinZoom + 0.5 });
+  }
+});
+for (const layer of CLICKABLE) {
+  map.on("mouseenter", layer, () => { map.getCanvas().style.cursor = "pointer"; });
+  map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; });
 }
 
 // --- legend ------------------------------------------------------------
@@ -917,21 +1021,13 @@ switcher.setAttribute("aria-label", "Choose a mushroom");
 document.body.appendChild(switcher);
 
 let active = null;
+let mapReady = false;
 
-function selectSpecies(cfg, { fit = false } = {}) {
+function selectSpecies(cfg) {
   if (active === cfg) return;
-  if (active) {
-    const previous = speciesLayer(active);
-    map.removeLayer(previous.stands);
-    map.removeLayer(previous.sightings);
-  }
-  map.closePopup();
+  popup?.remove();
   active = cfg;
-
-  const layer = speciesLayer(cfg);
-  layer.stands.addTo(map);
-  layer.sightings.addTo(map);
-  if (fit) map.fitBounds(layer.stands.getBounds());
+  if (mapReady) paintSpecies(cfg);
 
   legend.querySelector(".legend-title").textContent = `${cfg.name} probability`;
   legend.querySelector("small").textContent =
@@ -959,15 +1055,28 @@ for (const cfg of SPECIES) {
 // looking for the same mushroom
 let remembered = null;
 try { remembered = localStorage.getItem(STORAGE_KEY); } catch (e) { /* private mode */ }
-selectSpecies(SPECIES.find((s) => s.slug === remembered) || SPECIES[0], { fit: true });
+selectSpecies(SPECIES.find((s) => s.slug === remembered) || SPECIES[0]);
 
 // Live location: read the browser's geolocation and refresh a "you are here"
-// dot every 30s. file:// and localhost both count as secure contexts, so
-// this works when the map is opened straight from disk.
+// dot every 30s. localhost counts as a secure context, so this also works
+// when the map is served locally.
 const LOCATION_REFRESH_MS = 30000;
 let locationMarker = null;
-let accuracyCircle = null;
 let firstFix = true;
+
+// The accuracy radius as a polygon: MapLibre's own circles are sized in screen
+// pixels, not metres on the ground
+function accuracyCircle([lon, lat], radius, steps = 64) {
+  const ring = [];
+  for (let i = 0; i <= steps; i++) {
+    const angle = (i / steps) * 2 * Math.PI;
+    ring.push([
+      lon + (radius * Math.cos(angle)) / (111320 * Math.cos((lat * Math.PI) / 180)),
+      lat + (radius * Math.sin(angle)) / 110540,
+    ]);
+  }
+  return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [ring] } };
+}
 
 function updateLocation() {
   if (!("geolocation" in navigator)) {
@@ -976,17 +1085,19 @@ function updateLocation() {
   }
   navigator.geolocation.getCurrentPosition(
     (pos) => {
-      const latlng = [pos.coords.latitude, pos.coords.longitude];
+      const lngLat = [pos.coords.longitude, pos.coords.latitude];
       if (!locationMarker) {
-        locationMarker = L.marker(latlng, {
-          icon: L.divIcon({ className: "", html: '<div class="my-location-dot"></div>', iconSize: [16, 16] }),
-          zIndexOffset: 1000,
-        }).addTo(map).bindPopup("You are here");
-        accuracyCircle = L.circle(latlng, { radius: pos.coords.accuracy, color: "#1a73e8", weight: 1, fillOpacity: 0.1 }).addTo(map);
+        const dot = document.createElement("div");
+        dot.className = "my-location-dot";
+        locationMarker = new maplibregl.Marker({ element: dot })
+          .setLngLat(lngLat)
+          .setPopup(new maplibregl.Popup({ offset: 12, closeButton: false })
+            .setHTML('<div class="popup-note"><span>You are here</span></div>'))
+          .addTo(map);
       } else {
-        locationMarker.setLatLng(latlng);
-        accuracyCircle.setLatLng(latlng).setRadius(pos.coords.accuracy);
+        locationMarker.setLngLat(lngLat);
       }
+      map.getSource("accuracy").setData(accuracyCircle(lngLat, pos.coords.accuracy));
       // Only follow the fix once it is actually inside the mapped area. A
       // fix from home, from another town, or a bad first read would otherwise
       // drag the view onto empty basemap with no stands on it at all -- there
@@ -994,8 +1105,8 @@ function updateLocation() {
       // there. The whole area stays framed until then, and the first fix that
       // does land inside the map still centres on it, so driving in works as
       // before.
-      if (firstFix && DATA_BOUNDS.contains(latlng)) {
-        map.setView(latlng, 15);
+      if (firstFix && DATA_BOUNDS.contains(lngLat)) {
+        map.jumpTo({ center: lngLat, zoom: 15 });
         firstFix = false;
       }
     },
@@ -1004,8 +1115,34 @@ function updateLocation() {
   );
 }
 
-updateLocation();
-setInterval(updateLocation, LOCATION_REFRESH_MS);
+map.on("load", () => {
+  for (const layer of STAND_LAYERS) {
+    map.addLayer({ id: `${layer}-fill`, type: "fill", source: "stands", "source-layer": layer });
+    map.addLayer({
+      id: `${layer}-line`, type: "line", source: "stands", "source-layer": layer,
+      // zoomed out, outlines around stands a few pixels wide would be all
+      // there is to see, so they fade in as the stands grow
+      paint: { "line-width": 1, "line-opacity": ["interpolate", ["linear"], ["zoom"], 9, 0.15, 13, 0.6] },
+    });
+  }
+  map.addSource("accuracy", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "accuracy-fill", type: "fill", source: "accuracy",
+                 paint: { "fill-color": "#1a73e8", "fill-opacity": 0.1 } });
+  map.addLayer({ id: "accuracy-line", type: "line", source: "accuracy",
+                 paint: { "line-color": "#1a73e8", "line-width": 1 } });
+  addFlagImage();
+  map.addSource("sightings", { type: "geojson", data: SIGHTINGS });
+  map.addLayer({
+    id: "sightings", type: "symbol", source: "sightings",
+    layout: { "icon-image": "flag", "icon-anchor": "bottom-left", "icon-offset": [-4, 4],
+              "icon-allow-overlap": true, "icon-ignore-placement": true },
+  });
+
+  mapReady = true;
+  paintSpecies(active);
+  updateLocation();
+  setInterval(updateLocation, LOCATION_REFRESH_MS);
+});
 </script>
 </body>
 </html>
@@ -1013,8 +1150,10 @@ setInterval(updateLocation, LOCATION_REFRESH_MS);
 
 
 def render_html(geojson_dict: dict) -> str:
-    payload = json.dumps(to_page_payload(geojson_dict), ensure_ascii=False, separators=(",", ":"))
-    html = HTML_TEMPLATE.replace("__STANDS__", payload)
+    tiles = {"overview": OVERVIEW_LAYER, "detail": DETAIL_LAYER, "minzoom": TILE_MIN_ZOOM,
+             "maxzoom": TILE_MAX_ZOOM, "detailMinZoom": DETAIL_MIN_ZOOM}
+    html = HTML_TEMPLATE.replace("__TILES__", json.dumps(tiles))
+    html = html.replace("__BOUNDS__", json.dumps(data_bounds(geojson_dict)))
     html = html.replace("__SPECIES__", json.dumps(species_config(), ensure_ascii=False))
     html = html.replace("__LABELS__", json.dumps(label_config(), ensure_ascii=False))
     html = html.replace("__CATEGORIES__", json.dumps(MAPPED_CATEGORIES))
@@ -1035,10 +1174,16 @@ def main() -> None:
     OUTPUT_GEOJSON.parent.mkdir(parents=True, exist_ok=True)
     geojson_dict = to_geojson_dict(frames)
     OUTPUT_GEOJSON.write_text(json.dumps(geojson_dict, ensure_ascii=False), encoding="utf-8")
+    SITE_DIR.mkdir(parents=True, exist_ok=True)
+    write_tiles(geojson_dict)
+    (SITE_DIR / "_headers").write_text(PAGES_HEADERS, encoding="utf-8")
     OUTPUT_HTML.write_text(render_html(geojson_dict), encoding="utf-8")
 
+    tiles = list(TILES_DIR.rglob("*.pbf"))
     print(f"\nWrote {OUTPUT_GEOJSON} ({len(geojson_dict['features'])} stands, both species)")
-    print(f"Wrote {OUTPUT_HTML} ({OUTPUT_HTML.stat().st_size / 1e6:.1f} MB)")
+    print(f"Wrote {len(tiles)} vector tiles to {TILES_DIR} "
+          f"({sum(t.stat().st_size for t in tiles) / 1e6:.1f} MB)")
+    print(f"Wrote {OUTPUT_HTML} ({OUTPUT_HTML.stat().st_size / 1e3:.0f} KB)")
     for cfg in species_config():
         print(f"  {cfg['name']}: {len(cfg['sightings']['features'])} laji.fi sightings embedded as flags")
 

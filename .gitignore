@@ -7,3 +7,4 @@ output/scored_stands.geojson
 deploy/
 .wrangler/
 .env
+output/site/tiles/

@@ -1,18 +1,19 @@
 # Mushroom
 
-A mushroom map of Karkkila, Vihti, Espoo and Kirkkonummi in southern Finland, showing
+A mushroom map of nine municipalities in southern Finland, showing
 which patches of forest are most likely to grow chanterelles (*Cantharellus cibarius*) and funnel
-chanterelles (*Craterellus tubaeformis*). The four municipalities form one
-continuous area, from Karkkila down through Vihti and Nuuksio to the coast
-of Espoo and Kirkkonummi. It's built from Finland's open forest inventory data rather than
+chanterelles (*Craterellus tubaeformis*). Karkkila, Vihti, Lohja, Siuntio, Espoo,
+Kirkkonummi, Helsinki, Vantaa and Sipoo form one continuous area, from
+Karkkila and Lohja down through Vihti and Nuuksio to the coast, and along it
+from Siuntio to Sipoo. It's built from Finland's open forest inventory data rather than
 guesswork, and it's made to be used on your phone, in the woods. Each mushroom has its own map, and the buttons at
 the top switch between them.
 
 Karkkila is my home town. I've spent years walking its forests looking for
 chanterelles and have never once come home with enough to actually cook, so
 this is my fix for that. It's also why the map started with this one town
-rather than all of Finland, before growing south to take in Vihti, Espoo and
-Kirkkonummi, Nuuksio included. And it seems to help: the chanterelle map found mushrooms on
+rather than all of Finland, before growing to take in Vihti, Lohja, Nuuksio
+and the coast from Siuntio to Sipoo. And it seems to help: the chanterelle map found mushrooms on
 its very first outing, which is how the funnel chanterelle earned a map of
 its own.
 
@@ -31,8 +32,8 @@ an esker (a ridge of sand and gravel left behind by the last ice age). None
 of that is guesswork: Finland's forest inventory records nearly all of it,
 stand by stand, and the Geological Survey of Finland maps the eskers.
 
-This project takes that data for each of the roughly 66,000 forest stands
-in Karkkila, Vihti, Espoo and Kirkkonummi and scores every stand against those habitat
+This project takes that data for each of the roughly 154,000 forest stands
+in those nine municipalities and scores every stand against those habitat
 preferences. The stands are then ranked against each other instead of
 against a fixed cutoff. Most of this area is perfectly decent spruce forest,
 so a fixed cutoff would call nearly all of it "good", and that doesn't tell
@@ -58,7 +59,8 @@ A blank patch doesn't always mean poor forest, though. The open inventory
 doesn't cover every forest: only about half of Nuuksio National Park's area
 has stands in it, so parts of the park are simply missing from the map.
 
-Tap any stand to see its score and the forest data behind it. A green,
+Zoom in and tap any stand to see its score and the forest data behind it
+(zoomed out, a tap takes you in close enough to pick one). A green,
 yellow or red dot on each row shows which factors helped and which held it
 back. On a phone the map also shows where you are, updated every 30 seconds,
 and each popup has a button for directions there in Google Maps.
@@ -130,7 +132,7 @@ bound and as a way to compare versions of the model, not as its true
 accuracy.
 
 These figures were measured against Karkkila's forest, before the map grew
-to cover Vihti, Espoo and Kirkkonummi; the script now measures against the whole mapped
+to cover the other eight municipalities; the script now measures against the whole mapped
 area.
 
 Two lessons are built into that script. Sighting coordinates are capped at
@@ -173,9 +175,11 @@ people's yards, and check the rules if you're in a nature reserve.
 ## Setup
 
 Requires Python 3.11+ (the system Python on macOS is usually too old for
-current geopandas).
+current geopandas) and [tippecanoe](https://github.com/felt/tippecanoe),
+which cuts the map into vector tiles.
 
 ```
+brew install tippecanoe
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -185,14 +189,19 @@ pip install -r requirements.txt
 
 ```
 python scripts/download_data.py   # downloads + caches source data under data/
-python scripts/build_map.py       # scores stands for every species, writes output/
+python scripts/build_map.py       # scores stands for every species, writes output/site/
+python -m http.server -d output/site   # then open http://localhost:8000
 ```
 
-Then open `output/mushroom_map.html` in a browser. Both species live in
-that one file. Stand shapes are stored once and shared, packed as encoded
-polylines, and the labels are filled in by the browser from inventory codes.
-That keeps all four municipalities under 7 MB (about 2.6 MB compressed),
-small enough to load over mobile data in the middle of a forest.
+`output/site/` is the whole website: a small page (`index.html`), the stands
+as vector tiles (`tiles/`, not kept in git), and a `_headers` file telling
+Cloudflare Pages to serve the tiles compressed. The map is drawn on the GPU
+with [MapLibre](https://maplibre.org/), and a phone downloads only the tiles
+for the part of the map on screen, a few tens of kilobytes when zoomed in,
+however many municipalities the map covers. Both species share the same
+tiles: stand shapes are stored once, and the labels are filled in by the
+browser from inventory codes. The page reads its tiles over HTTP, so opening
+`index.html` straight from disk shows an empty map; serve the folder instead.
 
 To recalibrate a species against real sightings, put a free
 [laji.fi](https://laji.fi/) API token in `.env` as `LAJI_FI_TOKEN=...`, then
