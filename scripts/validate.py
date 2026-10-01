@@ -6,8 +6,8 @@ the finished score, all factors together, put real sighting locations near the
 top of the map? Without it a model can look well calibrated attribute by
 attribute and still rank no better than chance.
 
-    AUC   probability that a random real sighting outscores a random Karkkila
-          stand. 0.5 = coin toss, 1.0 = perfect separation.
+    AUC   probability that a random real sighting outscores a random stand in
+          the mapped area. 0.5 = coin toss, 1.0 = perfect separation.
     lift  how much more likely a sighting is to be in the top slice of the
           map than chance would give. The slice is defined by a score cutoff,
           and scores TIE heavily -- the tables are discrete, so thousands of
@@ -19,7 +19,7 @@ attribute and still rank no better than chance.
 
 Only the site factors are scored -- kasvupaikka, kehitysluokka, maapera,
 valoisuus and maastonmuoto. The species and sekametsa terms are left out because the sighting
-rows carry the WFS's PROPORTIONSPRUCE/PINE/OTHER while the Karkkila background
+rows carry the WFS's PROPORTIONSPRUCE/PINE/OTHER while the mapped area's background
 carries per-stratum basal areas, and scoring the two sides from different
 inputs would flatter or punish the model for the wrong reason.
 

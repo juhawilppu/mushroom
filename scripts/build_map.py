@@ -1,5 +1,6 @@
-"""Score Karkkila forest stands for mushroom habitat suitability and render
-the result as one standalone Leaflet HTML map with a species switcher.
+"""Score the forest stands of the mapped area (see area.py) for mushroom
+habitat suitability and render the result as one standalone Leaflet HTML map
+with a species switcher.
 
 The habitat heuristics themselves live in `scripts/species.py`, one profile
 per mushroom; this module is the engine that applies a profile to the forest
@@ -12,33 +13,27 @@ Both species ship in a single HTML file: stand geometry is by far the
 largest part of the payload and is identical between them, so it is written
 once and each species contributes only its own scores. Attributes are
 shipped as inventory codes and turned into English labels in the browser,
-which keeps the file smaller than the single-species map it replaces --
-this thing gets loaded over mobile data, in a forest.
+and the stands themselves are packed (see to_page_payload), which keeps a
+map of three municipalities smaller than the single-municipality one it
+replaces -- this thing gets loaded over mobile data, in a forest.
 
 Run scripts/download_data.py first.
 """
 
 import json
-from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 from shapely.geometry import mapping
 
+import area
 import species as sp
 import topography as topo
 from species import PROFILES, SpeciesProfile
 
-MUNICIPALITY = "Karkkila"
-
-ROOT = Path(__file__).resolve().parent.parent
-GPKG_PATH = ROOT / "data" / "raw" / f"MV_{MUNICIPALITY}" / f"MV_{MUNICIPALITY}.gpkg"
-GTK_FORMATIONS_PATH = ROOT / "data" / "cache" / f"gtk_formations_{MUNICIPALITY}.geojson"
-DEM_CACHE_PATH = topo.dem_cache_path(ROOT, MUNICIPALITY)
-TERRAIN_CACHE_PATH = ROOT / "data" / "cache" / f"terrain_stands_{MUNICIPALITY}.npz"
-OUTPUT_GEOJSON = ROOT / "output" / "scored_stands.geojson"
-OUTPUT_HTML = ROOT / "output" / "karkkila_mushroom_map.html"
+OUTPUT_GEOJSON = area.ROOT / "output" / "scored_stands.geojson"
+OUTPUT_HTML = area.ROOT / "output" / "mushroom_map.html"
 
 CURRENT_TREESTAND_CLASS = "2"  # "Nykytilan puusto" = current, as opposed to inventory/forecast
 
@@ -55,17 +50,15 @@ SCORED_FACTORS = ["fertility", "development", "species", "light", "soil", "terra
 COORD_DECIMALS = 5
 
 
-def laji_sightings_path(profile: SpeciesProfile) -> Path:
-    return ROOT / "data" / "cache" / f"laji_sightings_{MUNICIPALITY}_{profile.slug}.json"
-
-
-def load_layers():
-    stand = gpd.read_file(GPKG_PATH, layer="stand")[["standid", "area", "geometry"]]
-    stand = stand.join(compute_terrain(stand))
-    growthplace = gpd.read_file(GPKG_PATH, layer="growthplacedata")[
+def load_municipality(municipality: str):
+    gpkg_path = area.gpkg_path(municipality)
+    stand = gpd.read_file(gpkg_path, layer="stand")[["standid", "area", "geometry"]]
+    stand = stand.join(compute_terrain(stand, municipality))
+    stand["municipality"] = municipality
+    growthplace = gpd.read_file(gpkg_path, layer="growthplacedata")[
         ["standid", "maingroup", "subgroup", "fertilityclass", "soiltype", "drainagestate"]
     ]
-    treestand = gpd.read_file(GPKG_PATH, layer="treestand")
+    treestand = gpd.read_file(gpkg_path, layer="treestand")
     treestand = treestand[treestand["treestandclass"] == CURRENT_TREESTAND_CLASS][
         ["treestandid", "standid", "developmentclass"]
     ]
@@ -73,13 +66,26 @@ def load_layers():
     # have high basal area from a few big old trees (open, light) or the same
     # basal area from many small crowded ones (dark) -- stem density tells
     # those apart, basal area alone does not
-    treestandsummary = gpd.read_file(GPKG_PATH, layer="treestandsummary")[
+    treestandsummary = gpd.read_file(gpkg_path, layer="treestandsummary")[
         ["treestandid", "stemcount"]
     ]
-    treestratum = gpd.read_file(GPKG_PATH, layer="treestratum")[
+    treestratum = gpd.read_file(gpkg_path, layer="treestratum")[
         ["treestandid", "treespecies", "basalarea"]
     ]
     return stand, growthplace, treestand, treestandsummary, treestratum
+
+
+def load_layers():
+    """Every municipality's inventory tables, stacked into one population.
+
+    Stand and tree-stand ids are national, and no stand is published by two
+    municipalities, so stacking is all it takes -- and scoring one stacked
+    population, rather than each municipality on its own, is what lets the
+    ranking treat the whole area as one map.
+    """
+    per_municipality = [load_municipality(m) for m in area.MUNICIPALITIES]
+    stand, *tables = (pd.concat(parts, ignore_index=True) for parts in zip(*per_municipality))
+    return (gpd.GeoDataFrame(stand, geometry="geometry", crs=per_municipality[0][0].crs), *tables)
 
 
 def compute_species_mix(treestand: pd.DataFrame, treestratum: pd.DataFrame,
@@ -237,27 +243,28 @@ def score_stands(stand, growthplace, treestand, treestandsummary, treestratum,
     return gpd.GeoDataFrame(df, geometry="geometry", crs=stand.crs)
 
 
-def compute_terrain(stand: gpd.GeoDataFrame) -> pd.DataFrame:
+def compute_terrain(stand: gpd.GeoDataFrame, municipality: str) -> pd.DataFrame:
     """Landform metrics per stand, from the national 10 m elevation model.
 
     Purely geometric like the esker lookup, so it is computed once for every
     stand and handed to whichever species profile wants it. Cached, because it
     reads a few tens of megabytes of elevation over HTTP.
     """
-    if TERRAIN_CACHE_PATH.exists():
-        cached = np.load(TERRAIN_CACHE_PATH)
+    cache_path = area.terrain_path(municipality)
+    if cache_path.exists():
+        cached = np.load(cache_path)
         return pd.DataFrame({name: cached[name] for name in topo.METRICS}, index=stand.index)
 
-    print("Computing terrain metrics from the 10 m elevation model ...")
-    dem, transform = topo.read_dem(tuple(stand.total_bounds), cache_path=DEM_CACHE_PATH)
+    print(f"Computing terrain metrics for {municipality} from the 10 m elevation model ...")
+    dem, transform = topo.read_dem(tuple(stand.total_bounds), cache_path=area.dem_path(municipality))
     # sampled at the centroid, not averaged over the polygon: the sightings
     # this is calibrated against are single points, and a polygon average is
     # not the same quantity (see the note in topography.py)
     centroids = stand.geometry.centroid
     values = topo.sample_points(topo.terrain_metrics(dem), transform,
                                 centroids.x.to_numpy(), centroids.y.to_numpy())
-    TERRAIN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(TERRAIN_CACHE_PATH, **values)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(cache_path, **values)
     return pd.DataFrame(values, index=stand.index)
 
 
@@ -278,9 +285,15 @@ def compute_near_esker(stand: gpd.GeoDataFrame) -> pd.Series:
     profiles actually use it (suppilovahvero does not -- damp ground is the
     whole point for it, and free-draining sand is not where it fruits).
     """
-    if not GTK_FORMATIONS_PATH.exists():
+    paths = [area.gtk_formations_path(m) for m in area.MUNICIPALITIES]
+    if not any(path.exists() for path in paths):
         return pd.Series(False, index=stand.index)
-    formations = gpd.read_file(GTK_FORMATIONS_PATH).to_crs(stand.crs)
+    # each municipality's query is a bounding box, so neighbours overlap and a
+    # formation near a border arrives twice -- harmless, as they are unioned
+    formations = pd.concat(
+        [gpd.read_file(path).to_crs(stand.crs) for path in paths if path.exists()],
+        ignore_index=True,
+    )
     deposit_class = formations["DEPOSIT_TYPE_CLASS"].astype(str)
     glaciofluvial = deposit_class.str.startswith("1") & ~deposit_class.str.startswith("1.5")
     buffered = formations[glaciofluvial].buffer(sp.ESKER_BUFFER_M).union_all()
@@ -317,12 +330,14 @@ def categorize(gdf: gpd.GeoDataFrame, profile: SpeciesProfile) -> gpd.GeoDataFra
     "look, everything is green" -- no exceptions or partial credit.
 
     Everything else ranks against everything else rather than using fixed
-    score thresholds: Karkkila's forest land is overwhelmingly mesic,
+    score thresholds: the forest land here is overwhelmingly mesic,
     coarse-mineral-soil spruce/mixed forest, so the raw weighted score
-    clusters densely and a fixed cutoff would flag most of the municipality
+    clusters densely and a fixed cutoff would flag most of the area
     as "high". Relative ranking keeps the map useful for choosing where to go,
     and it is per species, so each map ranks stands against the habitat that
-    species actually has available.
+    species actually has available. It is across the whole mapped area, not
+    per municipality, so a colour means the same thing on both sides of a
+    border.
     """
     gdf["category"] = "excluded"
     non_excluded = ~gdf["excluded"]
@@ -433,11 +448,64 @@ def to_geojson_dict(frames: dict[str, gpd.GeoDataFrame]) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
+# Properties the page reads, in the order each stand's packed row carries them.
+# The stand id is not among them: it is in the GeoJSON export for GIS use, but
+# nothing on the page reads it.
+PAGE_FIELDS = (["lat", "lon", "fc", "dc", "ts", "st", "ds", "div", "stem", "esk", "tpi", "slp"]
+               + [profile.map_key for profile in PROFILES.values()])
+
+
+def encode_ring(ring: list) -> str:
+    """One polygon ring in Google's encoded polyline format, latitude first.
+
+    Each coordinate is stored as its difference from the previous one, at the
+    same 1e-5 degree precision COORD_DECIMALS rounds to, packed five bits to a
+    printable character. Stand outlines are short hops between nearby points,
+    so a coordinate costs two or three characters instead of the eight or nine
+    of a decimal number.
+    """
+    scale = 10 ** COORD_DECIMALS
+    chars, previous = [], (0, 0)
+    for lon, lat in ring:
+        point = (round(lat * scale), round(lon * scale))
+        for value, last in zip(point, previous):
+            delta = value - last
+            delta = ~(delta << 1) if delta < 0 else delta << 1
+            while delta >= 0x20:
+                chars.append(chr((0x20 | (delta & 0x1F)) + 63))
+                delta >>= 5
+            chars.append(chr(delta + 63))
+        previous = point
+    return "".join(chars)
+
+
+def to_page_payload(geojson_dict: dict) -> dict:
+    """The FeatureCollection repacked for the page, which unpacks it on load.
+
+    Written out as plain GeoJSON, three municipalities' stands come to over
+    20 MB -- far too much to load over mobile data in the middle of a forest.
+    Nearly all of that is repetition: every stand spells out the same property
+    names, and every vertex a full decimal coordinate. Here the names are
+    listed once, each stand is a row of values in that order, and each ring is
+    an encoded polyline.
+    """
+    features = geojson_dict["features"]
+    for feature in features:
+        if feature["geometry"]["type"] != "Polygon":
+            raise ValueError(f"the page only unpacks Polygons, got {feature['geometry']['type']}")
+    return {
+        "fields": PAGE_FIELDS,
+        "rows": [[f["properties"].get(name) for name in PAGE_FIELDS] for f in features],
+        "rings": [[encode_ring(ring) for ring in f["geometry"]["coordinates"]] for f in features],
+    }
+
+
 def load_sightings_geojson(profile: SpeciesProfile) -> dict:
-    path = laji_sightings_path(profile)
-    if not path.exists():
-        return {"type": "FeatureCollection", "features": []}
-    sightings = json.loads(path.read_text())
+    sightings = []
+    for municipality in area.MUNICIPALITIES:
+        path = area.laji_sightings_path(municipality, profile.slug)
+        if path.exists():
+            sightings += json.loads(path.read_text())
     features = [
         {
             "type": "Feature",
@@ -496,7 +564,7 @@ HTML_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Karkkila mushroom map</title>
+<title>__TITLE__</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
   :root {
@@ -619,7 +687,7 @@ HTML_TEMPLATE = """<!doctype html>
 <div id="map"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
-const STANDS = __GEOJSON__;
+const PACKED = __STANDS__;     // the stands, packed by to_page_payload in build_map.py
 const SPECIES = __SPECIES__;   // one entry per mushroom, in switcher order
 const LABELS = __LABELS__;     // inventory code -> English, expanded here rather
                                // than repeated on every stand in the payload
@@ -652,8 +720,41 @@ const CATEGORY_LABELS = { excellent: "Excellent", high: "High", medium: "Moderat
 // basemap underneath is busy
 const FILL_OPACITY = { excellent: 0.72, high: 0.58, medium: 0.45 };
 
-// Everything mapped here is inside one municipality, so this is the area the
-// map is ever useful in. Built from the stand centroids rather than from a
+// One ring from Google's encoded polyline format (latitude first, 1e-5
+// degrees), back into GeoJSON's [lon, lat] pairs.
+function decodeRing(encoded) {
+  const ring = [];
+  let i = 0, lat = 0, lon = 0;
+  while (i < encoded.length) {
+    const deltas = [0, 0].map(() => {
+      let shift = 0, value = 0, chunk;
+      do {
+        chunk = encoded.charCodeAt(i++) - 63;
+        value |= (chunk & 0x1f) << shift;
+        shift += 5;
+      } while (chunk >= 0x20);
+      return value & 1 ? ~(value >> 1) : value >> 1;
+    });
+    lat += deltas[0];
+    lon += deltas[1];
+    ring.push([lon / 1e5, lat / 1e5]);
+  }
+  return ring;
+}
+
+// Unpacked once into the plain GeoJSON that everything below works with: the
+// packing only exists to keep the download small.
+const STANDS = {
+  type: "FeatureCollection",
+  features: PACKED.rows.map((row, i) => ({
+    type: "Feature",
+    properties: Object.fromEntries(PACKED.fields.map((name, j) => [name, row[j]])),
+    geometry: { type: "Polygon", coordinates: PACKED.rings[i].map(decodeRing) },
+  })),
+};
+
+// Everything mapped is inside these few municipalities, so this is the area
+// the map is ever useful in. Built from the stand centroids rather than from a
 // layer, so it covers both species regardless of which one is showing.
 const DATA_BOUNDS = L.latLngBounds(
   STANDS.features.map((f) => [f.properties.lat, f.properties.lon])
@@ -760,8 +861,9 @@ function speciesLayer(cfg) {
         // the switcher and the legend are fixed overlays Leaflet knows nothing
         // about, so autopan has to be told to keep the popup clear of both --
         // without this a popup near the top edge opens with its score hidden
-        // behind the species buttons
-        layer.bindPopup(popupHtml(feature.properties, cfg), {
+        // behind the species buttons. The content is built when the popup
+        // opens rather than up front for tens of thousands of stands.
+        layer.bindPopup(() => popupHtml(feature.properties, cfg), {
           minWidth: 258,
           autoPanPaddingTopLeft: L.point(12, 72),
           autoPanPaddingBottomRight: L.point(12, 150),
@@ -887,9 +989,10 @@ function updateLocation() {
       // Only follow the fix once it is actually inside the mapped area. A
       // fix from home, from another town, or a bad first read would otherwise
       // drag the view onto empty basemap with no stands on it at all -- there
-      // is no data outside Karkkila, so there is nothing to look at there.
-      // Karkkila stays framed until then, and the first fix that does land
-      // inside the map still centres on it, so driving in works as before.
+      // is no data outside the mapped area, so there is nothing to look at
+      // there. The whole area stays framed until then, and the first fix that
+      // does land inside the map still centres on it, so driving in works as
+      // before.
       if (firstFix && DATA_BOUNDS.contains(latlng)) {
         map.setView(latlng, 15);
         firstFix = false;
@@ -909,10 +1012,12 @@ setInterval(updateLocation, LOCATION_REFRESH_MS);
 
 
 def render_html(geojson_dict: dict) -> str:
-    html = HTML_TEMPLATE.replace("__GEOJSON__", json.dumps(geojson_dict, ensure_ascii=False))
+    payload = json.dumps(to_page_payload(geojson_dict), ensure_ascii=False, separators=(",", ":"))
+    html = HTML_TEMPLATE.replace("__STANDS__", payload)
     html = html.replace("__SPECIES__", json.dumps(species_config(), ensure_ascii=False))
     html = html.replace("__LABELS__", json.dumps(label_config(), ensure_ascii=False))
     html = html.replace("__CATEGORIES__", json.dumps(MAPPED_CATEGORIES))
+    html = html.replace("__TITLE__", f"{area.AREA_NAME} mushroom map")
     return html.replace("__MID_THRESHOLD__", json.dumps(sp.MID_THRESHOLD))
 
 
@@ -923,7 +1028,7 @@ def main() -> None:
     frames = {}
     for slug, profile in PROFILES.items():
         frames[slug] = build_species_frame(layers, near_esker, profile)
-        counts = frames[slug]["category"].value_counts(dropna=False)
+        counts = pd.crosstab(frames[slug]["category"], frames[slug]["municipality"], margins=True)
         print(f"\n=== {profile.name} ===")
         print(counts.to_string())
 

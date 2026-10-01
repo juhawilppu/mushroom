@@ -2,12 +2,12 @@
 
 Not used to place pins on the map -- used as a check on the model itself.
 Pulls real observation coordinates for one mapped species from laji.fi
-(FinBIF) across a region ecologically comparable to Karkkila (southern
-Finland; Karkkila alone has too few sightings to be useful), looks
-up the actual forest stand each sighting landed in via Metsakeskus's
-point-queryable WFS, and compares that distribution (fertility class,
-development class, species mix, soil, drainage) against Karkkila's own stand
-population as the "available habitat" background. Categories that are
+(FinBIF) across a region ecologically comparable to the mapped area
+(southern Finland; the mapped municipalities alone have too few sightings to
+be useful), looks up the actual forest stand each sighting landed in via
+Metsakeskus's point-queryable WFS, and compares that distribution (fertility
+class, development class, species mix, soil, drainage) against the mapped
+area's own stand population as the "available habitat" background. Categories that are
 over-represented at real sighting locations relative to background support
 the model's weighting for that factor; under-represented ones call it into
 question.
@@ -28,6 +28,7 @@ import requests
 from pyproj import Transformer
 from shapely.geometry import Point, shape
 
+import area
 import build_map as bm
 import species as sp
 import topography as topo
@@ -36,8 +37,8 @@ from species import PROFILES, SpeciesProfile
 ROOT = Path(__file__).resolve().parent.parent
 
 # Uusimaa + neighbouring Kanta-Hame/Paijat-Hame/western Varsinais-Suomi: the
-# same southern-Finland managed-forest zone Karkkila sits in, so comparing
-# sighting locations against Karkkila's own stand population is apples-to-apples
+# same southern-Finland managed-forest zone the mapped area sits in, so comparing
+# sighting locations against its own stand population is apples-to-apples
 BBOX_WGS84 = "60.0:61.3:22.5:26.0:WGS84"
 # A sighting is only evidence about a stand if it can be placed IN that stand,
 # and stands here are 1-3 ha. The old 1000 m cap let a record 1 km wide be
@@ -187,8 +188,8 @@ def compare_terrain(presence: pd.DataFrame, background: pd.DataFrame) -> None:
         print(both.round(1).sort_index().to_string())
 
 
-def karkkila_background(profile: SpeciesProfile) -> pd.DataFrame:
-    """Available habitat: every Karkkila stand this species' model does not
+def area_background(profile: SpeciesProfile) -> pd.DataFrame:
+    """Available habitat: every stand in the mapped area this species' model does not
     exclude outright. The exclusions differ per species (kantarelli drops
     every mire type, suppilovahvero keeps korpi), so the background has to be
     built per species too."""
@@ -222,10 +223,10 @@ def main() -> None:
 
     token = load_token()
     df = build_sightings_with_stands(token, profile)
-    bg = karkkila_background(profile)
+    bg = area_background(profile)
 
     print(f"\n=== {profile.name} ({profile.latin}) ===")
-    print(f"{len(df)} sightings matched to a stand; {len(bg)} Karkkila stands as background")
+    print(f"{len(df)} sightings matched to a stand; {len(bg)} {area.AREA_NAME} stands as background")
 
     compare("Kasvupaikka (fertilityclass)", to_code_str(df["FERTILITYCLASS"]), bg["fertilityclass"], sp.FERTILITY_LABELS)
     compare("Kehitysluokka (developmentclass)", df["DEVELOPMENTCLASS"], bg["developmentclass"], sp.DEVELOPMENT_LABELS)

@@ -69,10 +69,6 @@ POINT_MARGIN_M = TPI_LARGE_M + 200
 METRICS = ("tpi_small", "tpi_large", "slope", "northness")
 
 
-def dem_cache_path(root: Path, name: str) -> Path:
-    return root / "data" / "cache" / f"dem10m_{name}.npz"
-
-
 def read_dem(bounds: tuple[float, float, float, float], margin_m: float = POINT_MARGIN_M,
              cache_path: Path | None = None) -> tuple[np.ndarray, "rasterio.Affine"]:
     """Elevation for a bounding box in EPSG:3067, padded so that focal windows

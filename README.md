@@ -1,16 +1,18 @@
 # Chanterelle
 
-A mushroom map of Karkkila, Finland, showing which patches of forest are
-most likely to grow chanterelles (*Cantharellus cibarius*) and funnel
-chanterelles (*Craterellus tubaeformis*). It's built from Finland's open
-forest inventory data rather than guesswork, and it's made to be used on
-your phone, in the woods. Each mushroom has its own map, and the buttons at
+A mushroom map of Karkkila, Vihti and Espoo in southern Finland, showing
+which patches of forest are most likely to grow chanterelles (*Cantharellus cibarius*) and funnel
+chanterelles (*Craterellus tubaeformis*). The three municipalities form one
+continuous strip, from Karkkila down through Vihti and Nuuksio to the Espoo
+coast. It's built from Finland's open forest inventory data rather than
+guesswork, and it's made to be used on your phone, in the woods. Each mushroom has its own map, and the buttons at
 the top switch between them.
 
 Karkkila is my home town. I've spent years walking its forests looking for
 chanterelles and have never once come home with enough to actually cook, so
-this is my fix for that. It's also why the map covers this one town and not
-all of Finland. And it seems to help: the chanterelle map found mushrooms on
+this is my fix for that. It's also why the map started with this one town
+rather than all of Finland, before growing south to take in Vihti and Espoo,
+Nuuksio included. And it seems to help: the chanterelle map found mushrooms on
 its very first outing, which is how the funnel chanterelle earned a map of
 its own.
 
@@ -29,11 +31,14 @@ an esker (a ridge of sand and gravel left behind by the last ice age). None
 of that is guesswork: Finland's forest inventory records nearly all of it,
 stand by stand, and the Geological Survey of Finland maps the eskers.
 
-This project takes that data for each of Karkkila's roughly 13,000 forest
-stands and scores every stand against those habitat preferences. The stands
-are then ranked against each other instead of against a fixed cutoff. Most of
-Karkkila is perfectly decent spruce forest, so a fixed cutoff would call
-nearly all of it "good", and that doesn't tell you where to go.
+This project takes that data for each of the roughly 51,000 forest stands
+in Karkkila, Vihti and Espoo and scores every stand against those habitat
+preferences. The stands are then ranked against each other instead of
+against a fixed cutoff. Most of this area is perfectly decent spruce forest,
+so a fixed cutoff would call nearly all of it "good", and that doesn't tell
+you where to go. The ranking spans the whole area rather than each
+municipality on its own, so a colour means the same thing on both sides of a
+municipal border, and Nuuksio straddles one.
 
 On the map, a stand is:
 
@@ -43,6 +48,15 @@ On the map, a stand is:
 - **Moderate** if it ranks in the next 35%
 
 The bottom half isn't drawn at all.
+
+Espoo comes out well. Its forest is noticeably older than Karkkila's or
+Vihti's: 37% of the stands it scores are mature and ready for felling,
+against 10% in Karkkila, and that's the strongest single signal both models
+have. Expect a lot of green in Espoo, Nuuksio included.
+
+A blank patch doesn't always mean poor forest, though. The open inventory
+doesn't cover every forest: only about half of Nuuksio National Park's area
+has stands in it, so parts of the park are simply missing from the map.
 
 Tap any stand to see its score and the forest data behind it. A green,
 yellow or red dot on each row shows which factors helped and which held it
@@ -115,6 +129,10 @@ the weights were tuned on these same sightings, so treat them as an upper
 bound and as a way to compare versions of the model, not as its true
 accuracy.
 
+These figures were measured against Karkkila's forest, before the map grew
+to cover Vihti and Espoo; the script now measures against the whole mapped
+area.
+
 Two lessons are built into that script. Sighting coordinates are capped at
 100 m accuracy: stands are only 1–3 ha, and a record that's only accurate to
 a kilometre describes the forest someone walked through, not the one the
@@ -145,12 +163,12 @@ people's yards, and check the rules if you're in a nature reserve.
 - [Maanmittauslaitos](https://www.maanmittauslaitos.fi/) (National Land
   Survey of Finland): the 10 m lidar-derived elevation model, used for
   landform. It's read with HTTP range requests from the openly mirrored
-  nationwide file at funet, so only the part covering Karkkila is ever
-  downloaded.
+  nationwide file at funet, so only the parts covering the mapped
+  municipalities are ever downloaded.
 - [laji.fi](https://laji.fi/) (Finnish Biodiversity Information Facility):
   real sighting coordinates per species. They're used to calibrate the
-  scoring weights and, for sightings inside Karkkila, as the flags on the
-  map. Requires a free API token; see `scripts/calibrate.py`.
+  scoring weights and, for sightings inside the mapped area, as the flags on
+  the map. Requires a free API token; see `scripts/calibrate.py`.
 
 ## Setup
 
@@ -170,17 +188,17 @@ python scripts/download_data.py   # downloads + caches source data under data/
 python scripts/build_map.py       # scores stands for every species, writes output/
 ```
 
-Then open `output/karkkila_mushroom_map.html` in a browser. Both species
-live in that one file. Stand shapes are stored once and shared, and the
-labels are filled in by the browser from inventory codes, which keeps the
-file under 6 MB: small enough to load over mobile data in the middle of a
-forest.
+Then open `output/mushroom_map.html` in a browser. Both species live in
+that one file. Stand shapes are stored once and shared, packed as encoded
+polylines, and the labels are filled in by the browser from inventory codes.
+That keeps all three municipalities to about 5 MB (2 MB compressed), small
+enough to load over mobile data in the middle of a forest.
 
 To recalibrate a species against real sightings, put a free
 [laji.fi](https://laji.fi/) API token in `.env` as `LAJI_FI_TOKEN=...`, then
 run `python scripts/calibrate.py --species suppilovahvero`. It prints how
-often each category turns up at sightings compared with Karkkila's forest as
-a whole. Use that to adjust the weights in that species' profile in
+often each category turns up at sightings compared with the mapped area's
+forest as a whole. Use that to adjust the weights in that species' profile in
 `scripts/species.py` by hand. (The code knows the species by their Finnish
 names, `kantarelli` and `suppilovahvero`.)
 
@@ -191,5 +209,6 @@ To add a mushroom, write another `SpeciesProfile` in `scripts/species.py`
 and add it to `PROFILES`. The scoring, the map, the switcher and the
 sighting downloads all pick it up from there.
 
-To map a different municipality, change `MUNICIPALITY` at the top of
-`scripts/download_data.py` and `scripts/build_map.py`, then rerun both.
+To change which municipalities are mapped, edit `MUNICIPALITIES` in
+`scripts/area.py`, then rerun both scripts. Each municipality's data is
+downloaded and cached separately, so adding one only fetches that one.

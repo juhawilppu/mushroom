@@ -1,4 +1,4 @@
-"""Per-species habitat profiles for the Karkkila mushroom maps.
+"""Per-species habitat profiles for the mushroom maps.
 
 Everything that differs between the mushrooms lives here: which stands are
 habitat at all, how each forestry attribute scores, how many points each
