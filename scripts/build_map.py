@@ -38,7 +38,7 @@ from translations import FINNISH
 
 OUTPUT_GEOJSON = area.ROOT / "output" / "scored_stands.geojson"
 # The deployable site: the page, the vector tiles it reads, and the host's
-# header rules. `wrangler pages deploy output/site` publishes it as it stands.
+# header rules. scripts/deploy.sh publishes it as it stands.
 SITE_DIR = area.ROOT / "output" / "site"
 OUTPUT_HTML = SITE_DIR / "index.html"
 TILES_DIR = SITE_DIR / "tiles"

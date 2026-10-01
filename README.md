@@ -208,6 +208,12 @@ tiles: stand shapes are stored once, and the labels are filled in by the
 browser from inventory codes. The page reads its tiles over HTTP, so opening
 `index.html` straight from disk shows an empty map; serve the folder instead.
 
+`scripts/deploy.sh` publishes `output/site/` to Cloudflare Pages as the live
+site. It needs Node (for `npx`) and a one-off `npx wrangler login`. The
+Pages project's production branch is `main` while this repo's is `master`;
+the script deploys to `main`, so a plain `wrangler pages deploy` from here
+would only make a preview.
+
 To recalibrate a species against real sightings, put a free
 [laji.fi](https://laji.fi/) API token in `.env` as `LAJI_FI_TOKEN=...`, then
 run `python scripts/calibrate.py --species suppilovahvero`. It prints how
