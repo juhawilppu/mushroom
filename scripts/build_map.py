@@ -565,7 +565,7 @@ HTML_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>__TITLE__</title>
+<title>Mushroom map</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
   :root {
@@ -1018,7 +1018,6 @@ def render_html(geojson_dict: dict) -> str:
     html = html.replace("__SPECIES__", json.dumps(species_config(), ensure_ascii=False))
     html = html.replace("__LABELS__", json.dumps(label_config(), ensure_ascii=False))
     html = html.replace("__CATEGORIES__", json.dumps(MAPPED_CATEGORIES))
-    html = html.replace("__TITLE__", f"{area.AREA_NAME} mushroom map")
     return html.replace("__MID_THRESHOLD__", json.dumps(sp.MID_THRESHOLD))
 
 

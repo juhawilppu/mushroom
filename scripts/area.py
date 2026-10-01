@@ -14,7 +14,7 @@ from pathlib import Path
 
 MUNICIPALITIES = ["Karkkila", "Vihti", "Espoo", "Kirkkonummi"]
 
-# "Karkkila, Vihti, Espoo and Kirkkonummi", for page titles and log lines
+# "Karkkila, Vihti, Espoo and Kirkkonummi", for log lines
 AREA_NAME = (", ".join(MUNICIPALITIES[:-1]) + " and " + MUNICIPALITIES[-1]
              if len(MUNICIPALITIES) > 1 else MUNICIPALITIES[0])
 
