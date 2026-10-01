@@ -1,19 +1,20 @@
 """The area the mushroom maps cover, and where each municipality's data lives.
 
 The map is one continuous area built from several neighbouring
-municipalities: Karkkila, Vihti south of it, and Espoo south of that, which
-between them take in the whole of Nuuksio. Every source is downloaded and
-cached per municipality, so adding one to MUNICIPALITIES fetches only that
-one's data, but the stands are scored and ranked as a single population: a
-stand's colour has to mean the same thing on both sides of a municipal
-border, and Nuuksio sits right across the Espoo-Vihti one.
+municipalities: Karkkila, Vihti south of it, Espoo south of that and
+Kirkkonummi west of Espoo, which between them take in the whole of Nuuksio.
+Every source is downloaded and cached per municipality, so adding one to
+MUNICIPALITIES fetches only that one's data, but the stands are scored and
+ranked as a single population: a stand's colour has to mean the same thing
+on both sides of a municipal border, and Nuuksio is split between three
+municipalities.
 """
 
 from pathlib import Path
 
-MUNICIPALITIES = ["Karkkila", "Vihti", "Espoo"]
+MUNICIPALITIES = ["Karkkila", "Vihti", "Espoo", "Kirkkonummi"]
 
-# "Karkkila, Vihti and Espoo", for page titles and log lines
+# "Karkkila, Vihti, Espoo and Kirkkonummi", for page titles and log lines
 AREA_NAME = (", ".join(MUNICIPALITIES[:-1]) + " and " + MUNICIPALITIES[-1]
              if len(MUNICIPALITIES) > 1 else MUNICIPALITIES[0])
 

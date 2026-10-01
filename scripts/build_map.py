@@ -13,9 +13,9 @@ Both species ship in a single HTML file: stand geometry is by far the
 largest part of the payload and is identical between them, so it is written
 once and each species contributes only its own scores. Attributes are
 shipped as inventory codes and turned into English labels in the browser,
-and the stands themselves are packed (see to_page_payload), which keeps a
-map of three municipalities smaller than the single-municipality one it
-replaces -- this thing gets loaded over mobile data, in a forest.
+and the stands themselves are packed (see to_page_payload), which keeps
+the page to a few megabytes even with several municipalities on it -- this
+thing gets loaded over mobile data, in a forest.
 
 Run scripts/download_data.py first.
 """
@@ -482,8 +482,9 @@ def encode_ring(ring: list) -> str:
 def to_page_payload(geojson_dict: dict) -> dict:
     """The FeatureCollection repacked for the page, which unpacks it on load.
 
-    Written out as plain GeoJSON, three municipalities' stands come to over
-    20 MB -- far too much to load over mobile data in the middle of a forest.
+    Written out as plain GeoJSON, the stands of even three municipalities
+    come to over 20 MB -- far too much to load over mobile data in the middle
+    of a forest.
     Nearly all of that is repetition: every stand spells out the same property
     names, and every vertex a full decimal coordinate. Here the names are
     listed once, each stand is a row of values in that order, and each ring is
@@ -857,20 +858,20 @@ function speciesLayer(cfg) {
         return { color: c.line, weight: 1, opacity: 0.6,
                  fillColor: c.fill, fillOpacity: FILL_OPACITY[category] ?? 0.45 };
       },
-      onEachFeature: (feature, layer) =>
-        // the switcher and the legend are fixed overlays Leaflet knows nothing
-        // about, so autopan has to be told to keep the popup clear of both --
-        // without this a popup near the top edge opens with its score hidden
-        // behind the species buttons. The content is built when the popup
-        // opens rather than up front for tens of thousands of stands.
-        layer.bindPopup(() => popupHtml(feature.properties, cfg), {
-          minWidth: 258,
-          autoPanPaddingTopLeft: L.point(12, 72),
-          autoPanPaddingBottomRight: L.point(12, 150),
-        }),
+    // One popup for the whole layer rather than one per stand: Leaflet hands
+    // the clicked stand to the content function, so the popup is filled in as
+    // it opens and tens of thousands of stands carry no popup of their own.
+    // The switcher and the legend are fixed overlays Leaflet knows nothing
+    // about, so autopan has to be told to keep the popup clear of both --
+    // without this a popup near the top edge opens with its score hidden
+    // behind the species buttons.
+    }).bindPopup((stand) => popupHtml(stand.feature.properties, cfg), {
+      minWidth: 258,
+      autoPanPaddingTopLeft: L.point(12, 72),
+      autoPanPaddingBottomRight: L.point(12, 150),
     });
     // Real laji.fi sighting flags for this species, where a report happens to
-    // fall inside the municipality
+    // fall inside the mapped area
     const sightings = L.geoJSON(cfg.sightings, {
       pointToLayer: (feature, latlng) => L.marker(latlng, {
         icon: L.divIcon({ className: "", html: '<div class="sighting-flag">🚩</div>', iconSize: [20, 20], iconAnchor: [4, 18] }),

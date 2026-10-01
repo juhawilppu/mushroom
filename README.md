@@ -1,18 +1,18 @@
 # Chanterelle
 
-A mushroom map of Karkkila, Vihti and Espoo in southern Finland, showing
+A mushroom map of Karkkila, Vihti, Espoo and Kirkkonummi in southern Finland, showing
 which patches of forest are most likely to grow chanterelles (*Cantharellus cibarius*) and funnel
-chanterelles (*Craterellus tubaeformis*). The three municipalities form one
-continuous strip, from Karkkila down through Vihti and Nuuksio to the Espoo
-coast. It's built from Finland's open forest inventory data rather than
+chanterelles (*Craterellus tubaeformis*). The four municipalities form one
+continuous area, from Karkkila down through Vihti and Nuuksio to the coast
+of Espoo and Kirkkonummi. It's built from Finland's open forest inventory data rather than
 guesswork, and it's made to be used on your phone, in the woods. Each mushroom has its own map, and the buttons at
 the top switch between them.
 
 Karkkila is my home town. I've spent years walking its forests looking for
 chanterelles and have never once come home with enough to actually cook, so
 this is my fix for that. It's also why the map started with this one town
-rather than all of Finland, before growing south to take in Vihti and Espoo,
-Nuuksio included. And it seems to help: the chanterelle map found mushrooms on
+rather than all of Finland, before growing south to take in Vihti, Espoo and
+Kirkkonummi, Nuuksio included. And it seems to help: the chanterelle map found mushrooms on
 its very first outing, which is how the funnel chanterelle earned a map of
 its own.
 
@@ -31,14 +31,14 @@ an esker (a ridge of sand and gravel left behind by the last ice age). None
 of that is guesswork: Finland's forest inventory records nearly all of it,
 stand by stand, and the Geological Survey of Finland maps the eskers.
 
-This project takes that data for each of the roughly 51,000 forest stands
-in Karkkila, Vihti and Espoo and scores every stand against those habitat
+This project takes that data for each of the roughly 66,000 forest stands
+in Karkkila, Vihti, Espoo and Kirkkonummi and scores every stand against those habitat
 preferences. The stands are then ranked against each other instead of
 against a fixed cutoff. Most of this area is perfectly decent spruce forest,
 so a fixed cutoff would call nearly all of it "good", and that doesn't tell
 you where to go. The ranking spans the whole area rather than each
 municipality on its own, so a colour means the same thing on both sides of a
-municipal border, and Nuuksio straddles one.
+municipal border, and Nuuksio is split between three municipalities.
 
 On the map, a stand is:
 
@@ -130,7 +130,7 @@ bound and as a way to compare versions of the model, not as its true
 accuracy.
 
 These figures were measured against Karkkila's forest, before the map grew
-to cover Vihti and Espoo; the script now measures against the whole mapped
+to cover Vihti, Espoo and Kirkkonummi; the script now measures against the whole mapped
 area.
 
 Two lessons are built into that script. Sighting coordinates are capped at
@@ -191,8 +191,8 @@ python scripts/build_map.py       # scores stands for every species, writes outp
 Then open `output/mushroom_map.html` in a browser. Both species live in
 that one file. Stand shapes are stored once and shared, packed as encoded
 polylines, and the labels are filled in by the browser from inventory codes.
-That keeps all three municipalities to about 5 MB (2 MB compressed), small
-enough to load over mobile data in the middle of a forest.
+That keeps all four municipalities under 7 MB (about 2.6 MB compressed),
+small enough to load over mobile data in the middle of a forest.
 
 To recalibrate a species against real sightings, put a free
 [laji.fi](https://laji.fi/) API token in `.env` as `LAJI_FI_TOKEN=...`, then
