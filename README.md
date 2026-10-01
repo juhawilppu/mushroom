@@ -1,4 +1,4 @@
-# Chanterelle
+# Mushroom
 
 A mushroom map of Karkkila, Vihti, Espoo and Kirkkonummi in southern Finland, showing
 which patches of forest are most likely to grow chanterelles (*Cantharellus cibarius*) and funnel
@@ -19,7 +19,7 @@ its own.
 In Finnish they're *kantarelli* and *suppilovahvero*, names you'll still see
 in the code.
 
-**Live map: [chanterelle.juhawilppu.com](https://chanterelle.juhawilppu.com)**
+**Live map: [mushroom.juhawilppu.com](https://mushroom.juhawilppu.com)**
 
 ![Screenshot of the Karkkila mushroom map: a Chanterelle / Funnel chanterelle switcher above forest stands shaded by probability, with an open popup breaking one stand's score down factor by factor — a green, yellow or red dot per factor showing which ones earned the score and which held it back](docs/screenshot.jpg)
 
